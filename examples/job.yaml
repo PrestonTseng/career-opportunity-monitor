@@ -1,0 +1,14 @@
+schema_version: 1
+source_name: fictional-workday
+source_job_id: example-001
+source_url: https://jobs.example.test/example-001
+company: Example Semiconductor
+title: Software Engineer
+description_text: Build Python testing and data processing services.
+location:
+  country_code: TW
+  region: Hsinchu
+  work_mode: hybrid
+employment_type: full-time
+posted_at: "2026-08-27T00:00:00Z"
+compensation: null

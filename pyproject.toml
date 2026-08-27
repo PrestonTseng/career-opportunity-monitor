@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "career-opportunity-monitor"
+version = "0.1.0"
+description = "A public, self-hosted career opportunity monitor."
+requires-python = ">=3.13"
+dependencies = [
+  "jsonschema>=4.25,<5",
+  "pyyaml>=6.0,<7",
+]
+
+[project.scripts]
+career-monitor = "career_opportunity_monitor.runtime:main"
+
+[dependency-groups]
+dev = [
+  "pyright>=1.1.405,<2",
+  "pytest>=8.4,<9",
+  "ruff>=0.12,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/career_opportunity_monitor"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"schemas" = "career_opportunity_monitor/schemas"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pyright]
+include = ["src", "tests"]
+typeCheckingMode = "strict"

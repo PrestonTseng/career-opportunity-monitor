@@ -1,0 +1,81 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "https://career-monitor.example/schemas/v1/job.schema.json"
+title: Canonical job version 1
+type: object
+additionalProperties: false
+required:
+  - schema_version
+  - source_name
+  - source_job_id
+  - source_url
+  - company
+  - title
+properties:
+  schema_version:
+    const: 1
+  source_name:
+    $ref: "#/$defs/nonEmpty"
+  source_job_id:
+    $ref: "#/$defs/nonEmpty"
+  source_url:
+    type: string
+    format: uri
+    minLength: 1
+    pattern: "^https?://"
+  company:
+    $ref: "#/$defs/nonEmpty"
+  title:
+    $ref: "#/$defs/nonEmpty"
+  description_text:
+    oneOf:
+      - type: "null"
+      - $ref: "#/$defs/nonEmpty"
+  location:
+    oneOf:
+      - type: "null"
+      - type: object
+        additionalProperties: false
+        properties:
+          country_code:
+            oneOf:
+              - type: "null"
+              - type: string
+                pattern: "^[A-Z]{2}$"
+          region:
+            oneOf:
+              - type: "null"
+              - $ref: "#/$defs/nonEmpty"
+          work_mode:
+            oneOf:
+              - type: "null"
+              - enum: [office, hybrid, remote, unknown]
+  employment_type:
+    oneOf:
+      - type: "null"
+      - $ref: "#/$defs/nonEmpty"
+  posted_at:
+    oneOf:
+      - type: "null"
+      - type: string
+        format: date-time
+  compensation:
+    oneOf:
+      - type: "null"
+      - type: object
+        additionalProperties: false
+        required: [minimum, maximum, currency, period]
+        properties:
+          minimum:
+            type: number
+          maximum:
+            type: number
+          currency:
+            type: string
+            pattern: "^[A-Z]{3}$"
+          period:
+            $ref: "#/$defs/nonEmpty"
+$defs:
+  nonEmpty:
+    type: string
+    minLength: 1
+    pattern: ".*\\S.*"

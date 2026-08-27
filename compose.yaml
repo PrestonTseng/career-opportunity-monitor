@@ -1,0 +1,85 @@
+x-runtime: &runtime
+  image: career-opportunity-monitor:${CAREER_MONITOR_IMAGE_TAG:-local}
+  build:
+    context: .
+    dockerfile: Dockerfile
+  user: "${CAREER_MONITOR_UID:-10001}:${CAREER_MONITOR_GID:-10001}"
+  read_only: true
+  tmpfs:
+    - /tmp:size=16m,mode=1777
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  environment:
+    CAREER_MONITOR_CONFIG_DIR: /config
+    CAREER_MONITOR_DATA_DIR: /data
+    CAREER_MONITOR_DISPLAY_LIMIT: ${CAREER_MONITOR_DISPLAY_LIMIT:-25}
+    CAREER_MONITOR_LLM_API_KEY_FILE: /run/secrets/llm-api-key
+    CAREER_MONITOR_LLM_BASE_URL: ${CAREER_MONITOR_LLM_BASE_URL:-}
+    CAREER_MONITOR_LLM_MODE: ${CAREER_MONITOR_LLM_MODE:-off}
+    CAREER_MONITOR_LLM_MODEL: ${CAREER_MONITOR_LLM_MODEL:-}
+    CAREER_MONITOR_LLM_PROMPT_VERSION: ${CAREER_MONITOR_LLM_PROMPT_VERSION:-v1}
+    CAREER_MONITOR_LLM_RETRIES: ${CAREER_MONITOR_LLM_RETRIES:-0}
+    CAREER_MONITOR_LLM_TIMEOUT_SECONDS: ${CAREER_MONITOR_LLM_TIMEOUT_SECONDS:-10}
+    CAREER_MONITOR_LOCK_TIMEOUT_SECONDS: ${CAREER_MONITOR_LOCK_TIMEOUT_SECONDS:-0.25}
+    CAREER_MONITOR_RESUME_PATH: /profile/resume_facts.yaml
+  secrets:
+    - source: llm-api-key
+      target: llm-api-key
+  volumes:
+    - type: bind
+      source: ${CAREER_MONITOR_RESUME_FILE:-./examples/resume_facts.yaml}
+      target: /profile/resume_facts.yaml
+      read_only: true
+    - type: bind
+      source: ${CAREER_MONITOR_CONFIG_DIR:-./examples/strategy/v1}
+      target: /config
+      read_only: true
+    - type: volume
+      source: runtime-data
+      target: /data
+
+services:
+  scheduler:
+    <<: *runtime
+    profiles:
+      - scheduler
+    init: true
+    restart: unless-stopped
+    entrypoint:
+      - /usr/local/bin/supercronic
+    command:
+      - -passthrough-logs
+      - /etc/career-monitor/crontab
+    volumes:
+      - type: bind
+        source: ${CAREER_MONITOR_RESUME_FILE:-./examples/resume_facts.yaml}
+        target: /profile/resume_facts.yaml
+        read_only: true
+      - type: bind
+        source: ${CAREER_MONITOR_CONFIG_DIR:-./examples/strategy/v1}
+        target: /config
+        read_only: true
+      - type: volume
+        source: runtime-data
+        target: /data
+      - type: bind
+        source: ${CAREER_MONITOR_CRONTAB_FILE:-./deploy/crontab}
+        target: /etc/career-monitor/crontab
+        read_only: true
+
+  cli:
+    <<: *runtime
+    profiles:
+      - cli
+    restart: "no"
+    command:
+      - validate
+
+volumes:
+  runtime-data:
+
+secrets:
+  llm-api-key:
+    file: ${CAREER_MONITOR_LLM_SECRET_FILE:-/dev/null}

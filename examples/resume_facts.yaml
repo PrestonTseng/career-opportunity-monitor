@@ -1,0 +1,22 @@
+schema_version: 1
+profile_id: alex-chen-fictional
+person:
+  display_name: Alex Chen
+  location:
+    country_code: TW
+    region: Hsinchu
+facts:
+  - id: fact-python-services
+    kind: skill
+    status: confirmed
+    statement: Built tested Python services for internal data processing.
+    keywords:
+      - Python
+      - testing
+      - data processing
+  - id: fact-cloud-certification
+    kind: certification
+    status: planned
+    statement: Plans to earn a cloud architecture certification.
+    keywords:
+      - cloud architecture

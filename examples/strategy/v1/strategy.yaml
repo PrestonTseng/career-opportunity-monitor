@@ -1,0 +1,43 @@
+schema_version: 1
+strategy_id: taiwan-software-fictional
+validation_source:
+  company: NVIDIA
+  platform: workday
+  country_code: TW
+role_targets:
+  - Software Engineer
+  - Data Engineer
+markets:
+  - country_code: TW
+    regions:
+      - Hsinchu
+      - Taipei
+    remote: true
+companies:
+  preferred:
+    - Example Semiconductor
+  excluded: []
+  referral_available:
+    - Example Semiconductor
+ranking:
+  base_score:
+    minimum: 0
+    maximum: 100
+  weights:
+    title: 30
+    skills: 30
+    experience: 20
+    location: 15
+    company: 5
+  caps:
+    title: 30
+    skills: 30
+    experience: 20
+    location: 15
+    company: 5
+  llm_adjustment:
+    enabled: false
+    minimum: -5
+    maximum: 5
+missing_data:
+  policy: unknown

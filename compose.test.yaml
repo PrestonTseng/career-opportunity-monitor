@@ -1,0 +1,39 @@
+# Test-only storage override for Docker daemons that cannot access client bind paths.
+services:
+  cli:
+    volumes: !override
+      - type: volume
+        source: profile-data
+        target: /profile
+        read_only: true
+      - type: volume
+        source: config-data
+        target: /config
+        read_only: true
+      - type: volume
+        source: runtime-data
+        target: /data
+
+  scheduler:
+    volumes: !override
+      - type: volume
+        source: profile-data
+        target: /profile
+        read_only: true
+      - type: volume
+        source: config-data
+        target: /config
+        read_only: true
+      - type: volume
+        source: runtime-data
+        target: /data
+      - type: volume
+        source: crontab-data
+        target: /etc/career-monitor
+        read_only: true
+
+volumes:
+  profile-data:
+  config-data:
+  runtime-data:
+  crontab-data:

@@ -1,0 +1,186 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "https://career-monitor.example/schemas/v1/strategy.schema.json"
+title: Career strategy version 1
+type: object
+additionalProperties: false
+required:
+  - schema_version
+  - strategy_id
+  - validation_source
+  - role_targets
+  - markets
+  - companies
+  - ranking
+  - missing_data
+properties:
+  schema_version:
+    const: 1
+  strategy_id:
+    type: string
+    pattern: "^[a-z][a-z0-9-]{2,63}$"
+  validation_source:
+    type: object
+    additionalProperties: false
+    required:
+      - company
+      - platform
+      - country_code
+    properties:
+      company:
+        const: NVIDIA
+      platform:
+        const: workday
+      country_code:
+        const: TW
+  role_targets:
+    type: array
+    minItems: 1
+    uniqueItems: true
+    items:
+      type: string
+      minLength: 1
+      maxLength: 120
+  markets:
+    type: array
+    minItems: 1
+    uniqueItems: true
+    items:
+      type: object
+      additionalProperties: false
+      required:
+        - country_code
+        - regions
+        - remote
+      properties:
+        country_code:
+          type: string
+          pattern: "^[A-Z]{2}$"
+        regions:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 120
+        remote:
+          type: boolean
+  companies:
+    type: object
+    additionalProperties: false
+    required:
+      - preferred
+      - excluded
+      - referral_available
+    properties:
+      preferred:
+        type: array
+        uniqueItems: true
+        items:
+          type: string
+          minLength: 1
+          maxLength: 120
+      excluded:
+        type: array
+        uniqueItems: true
+        items:
+          type: string
+          minLength: 1
+          maxLength: 120
+      referral_available:
+        description: Company names only; personal contact details are forbidden.
+        type: array
+        uniqueItems: true
+        items:
+          type: string
+          minLength: 1
+          maxLength: 120
+  ranking:
+    type: object
+    additionalProperties: false
+    required:
+      - base_score
+      - weights
+      - caps
+      - llm_adjustment
+    properties:
+      base_score:
+        type: object
+        additionalProperties: false
+        required:
+          - minimum
+          - maximum
+        properties:
+          minimum:
+            const: 0
+          maximum:
+            const: 100
+      weights:
+        type: object
+        additionalProperties: false
+        required:
+          - title
+          - skills
+          - experience
+          - location
+          - company
+        properties:
+          title:
+            $ref: "#/$defs/scorePart"
+          skills:
+            $ref: "#/$defs/scorePart"
+          experience:
+            $ref: "#/$defs/scorePart"
+          location:
+            $ref: "#/$defs/scorePart"
+          company:
+            $ref: "#/$defs/scorePart"
+      caps:
+        type: object
+        additionalProperties: false
+        required:
+          - title
+          - skills
+          - experience
+          - location
+          - company
+        properties:
+          title:
+            $ref: "#/$defs/scorePart"
+          skills:
+            $ref: "#/$defs/scorePart"
+          experience:
+            $ref: "#/$defs/scorePart"
+          location:
+            $ref: "#/$defs/scorePart"
+          company:
+            $ref: "#/$defs/scorePart"
+      llm_adjustment:
+        $ref: "#/$defs/llmAdjustment"
+  missing_data:
+    type: object
+    additionalProperties: false
+    required:
+      - policy
+    properties:
+      policy:
+        const: unknown
+$defs:
+  scorePart:
+    type: integer
+    minimum: 0
+    maximum: 100
+  llmAdjustment:
+    type: object
+    additionalProperties: false
+    required:
+      - enabled
+      - minimum
+      - maximum
+    properties:
+      enabled:
+        type: boolean
+        default: false
+      minimum:
+        const: -5
+      maximum:
+        const: 5

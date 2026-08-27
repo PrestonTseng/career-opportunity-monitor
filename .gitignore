@@ -1,0 +1,27 @@
+# Python files
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.pyright/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Private inputs and outputs
+/.runtime/
+/resume_facts.yaml
+/strategy/
+/data/
+/reports/
+/receipts/
+/logs/
+*.sqlite
+*.sqlite3
