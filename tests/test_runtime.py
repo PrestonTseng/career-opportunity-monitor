@@ -13,6 +13,7 @@ from career_opportunity_monitor.repository import SourceObservation
 from career_opportunity_monitor.runtime import run
 from career_opportunity_monitor.source import SourceError, SourceFetchResult
 from career_opportunity_monitor.sqlite_repository import SQLiteRepository
+from career_opportunity_monitor.workday import WorkdaySource
 
 ROOT = Path(__file__).parents[1]
 
@@ -86,7 +87,7 @@ def test_daily_dry_run_writes_a_quiet_receipt(
 
 @dataclass(frozen=True)
 class FixtureSource:
-    name: str = "nvidia-workday"
+    name: str = "example-workday"
 
     def fetch(self) -> SourceFetchResult:
         job = parse_job(
@@ -95,7 +96,7 @@ class FixtureSource:
                 "source_name": self.name,
                 "source_job_id": "JR-FICTIONAL-1",
                 "source_url": "https://jobs.example/JR-FICTIONAL-1",
-                "company": "NVIDIA",
+                "company": "Example Company",
                 "title": "Software Engineer",
                 "description_text": "Python testing and data processing",
                 "location": {
@@ -131,7 +132,7 @@ class FixtureSource:
 
 @dataclass(frozen=True)
 class EmptyPartialSource:
-    name: str = "nvidia-workday"
+    name: str = "example-workday"
 
     def fetch(self) -> SourceFetchResult:
         return SourceFetchResult(
@@ -150,6 +151,12 @@ class FailedSource:
 
     def fetch(self) -> SourceFetchResult:
         raise SourceError("source collection failed: temporary outage")
+
+
+class MalformedExternalPathTransport:
+    def request(self, url: str, body: bytes | None) -> bytes:
+        assert body is not None
+        return b'{"total":1,"jobPostings":[{"externalPath":"https://["}]}'
 
 
 def test_daily_collects_configured_sources_in_order_and_isolates_one_failure(
@@ -180,11 +187,66 @@ def test_daily_collects_configured_sources_in_order_and_isolates_one_failure(
     assert receipt["accepted"] == 2
     assert receipt["source_failures"] == 1
     repository = SQLiteRepository(data_directory / "history.sqlite3")
-    assert [repository.get_source_run(index).status for index in (1, 2, 3)] == [
+    source_runs = [repository.get_source_run(index) for index in (1, 2, 3)]
+    assert [source_run.status for source_run in source_runs] == [
         "completed",
         "failed",
         "completed",
     ]
+    assert {source_run.sources_hash for source_run in source_runs} == {
+        receipt["sources_hash"]
+    }
+    repository.close()
+
+
+def test_daily_isolates_malformed_workday_data_between_valid_sources(
+    tmp_path: Path,
+) -> None:
+    environment = _runtime_environment(tmp_path)
+    environment["CAREER_MONITOR_RUN_ID"] = "malformed-middle"
+    environment["CAREER_MONITOR_NOW"] = "2026-08-27T03:30:00Z"
+    malformed = WorkdaySource(
+        name="malformed-workday",
+        origin="https://malformed.example.com",
+        tenant="malformed",
+        site="ExternalCareerSite",
+        company="Malformed Example",
+        search_text="Taiwan",
+        transport=MalformedExternalPathTransport(),
+        retries=0,
+    )
+
+    exit_code = run(
+        ("daily",),
+        environment=environment,
+        sources=(
+            FixtureSource("first-workday"),
+            malformed,
+            FixtureSource("second-workday"),
+        ),
+    )
+
+    assert exit_code == 0
+    data_directory = Path(environment["CAREER_MONITOR_DATA_DIR"])
+    report = (data_directory / "reports" / "daily-2026-08-27.md").read_text()
+    assert report.index("- first-workday.") < report.index("- malformed-workday.")
+    assert report.index("- malformed-workday.") < report.index("- second-workday.")
+    receipt = json.loads(
+        (data_directory / "receipts" / "daily-malformed-middle.json").read_text()
+    )
+    assert receipt["accepted"] == 2
+    assert receipt["source_partial"] is True
+    repository = SQLiteRepository(data_directory / "history.sqlite3")
+    assert [repository.get_source_run(index).status for index in (1, 2, 3)] == [
+        "completed",
+        "completed",
+        "completed",
+    ]
+    malformed_run = repository.get_source_run(2)
+    assert malformed_run.receipt is not None
+    malformed_receipt = json.loads(malformed_run.receipt)
+    assert malformed_receipt["partial"] is True
+    assert "unsafe externalPath" in malformed_receipt["failures"][0]
     repository.close()
 
 
@@ -207,7 +269,7 @@ def test_daily_live_run_collects_scores_and_writes_report(
     assert "LLM adjustment: +0 (off)." in report
     assert "Evidence IDs: fact-python-services." in report
     assert "Omitted jobs: 0." in report
-    assert "- nvidia-workday. Status: complete." in report
+    assert "- example-workday. Status: complete." in report
 
     receipt_path = data_directory / "receipts" / "daily-daily-live-fixture.json"
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
@@ -270,7 +332,7 @@ def test_partial_daily_run_does_not_age_unseen_jobs(tmp_path: Path) -> None:
     repository = SQLiteRepository(
         Path(environment["CAREER_MONITOR_DATA_DIR"]) / "history.sqlite3"
     )
-    assert repository.get_job("nvidia-workday", "JR-FICTIONAL-1").state == "new"
+    assert repository.get_job("example-workday", "JR-FICTIONAL-1").state == "new"
     repository.close()
 
 
@@ -292,12 +354,15 @@ def test_total_source_outage_exits_nonzero_and_keeps_failed_run_evidence(
         )
     )
     assert error["status"] == "failed"
+    assert isinstance(error["sources_hash"], str)
+    assert len(error["sources_hash"]) == 64
     assert "source collection failed" in error["error"]
     assert "source collection failed" in capsys.readouterr().err
     repository = SQLiteRepository(data_directory / "history.sqlite3")
     source_run = repository.get_source_run(1)
     assert source_run.status == "failed"
     assert source_run.error == "source collection failed: temporary outage"
+    assert source_run.sources_hash == error["sources_hash"]
     repository.close()
 
 

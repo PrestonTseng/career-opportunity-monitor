@@ -25,7 +25,7 @@ The `.gitignore` and `.dockerignore` files exclude common private paths. These f
 
 Use a read-only secret file for an optional LLM API key. Do not put a key in an environment example or command history.
 
-The NVIDIA Workday source needs no credential. The application exposes no network port.
+Configured Workday sources need no credential. The application exposes no network port.
 
 ## Reports
 

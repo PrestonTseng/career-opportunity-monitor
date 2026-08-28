@@ -102,7 +102,12 @@ class UrlLibTransport:
                     location = response.getheader("Location")
                     if location is None or redirect_count == 5:
                         raise SourceError("source returned an invalid redirect")
-                    current_url = urljoin(current_url, location)
+                    try:
+                        current_url = urljoin(current_url, location)
+                    except ValueError as exc:
+                        raise SourceError(
+                            "source returned an invalid redirect"
+                        ) from exc
                     if response.status in (301, 302, 303):
                         current_body = None
                     continue
@@ -160,7 +165,12 @@ def _origin(value: str) -> str:
 
 
 def validate_approved_url(url: str, approved_origin: str) -> tuple[str, ...]:
-    parsed = urlsplit(url)
+    try:
+        parsed = urlsplit(url)
+    except ValueError as exc:
+        raise SourceError(
+            "request URL is outside the configured approved origin"
+        ) from exc
     if (
         _origin(approved_origin) != approved_origin
         or parsed.scheme != "https"
@@ -184,7 +194,12 @@ def validate_approved_url(url: str, approved_origin: str) -> tuple[str, ...]:
 
 
 def _assert_official_url(url: str, approved_origin: str, site: str) -> None:
-    parsed = urlsplit(url)
+    try:
+        parsed = urlsplit(url)
+    except ValueError as exc:
+        raise SourceError(
+            "detail official URL is outside the configured Workday origin"
+        ) from exc
     if (
         parsed.scheme != "https"
         or parsed.username is not None
@@ -365,7 +380,10 @@ def _external_path(item: object) -> str:
     value = _object_dict(cast(object, item)).get("externalPath")
     if not isinstance(value, str):
         raise SourceError("list posting has unsafe externalPath")
-    parsed = urlsplit(value)
+    try:
+        parsed = urlsplit(value)
+    except ValueError as exc:
+        raise SourceError("list posting has unsafe externalPath") from exc
     if (
         parsed.scheme
         or parsed.netloc

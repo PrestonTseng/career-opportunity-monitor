@@ -23,11 +23,16 @@ class CollectionService:
         self._repository = repository
 
     def collect(
-        self, source: JobSource, *, run_id: str, now: str | None = None
+        self,
+        source: JobSource,
+        *,
+        run_id: str,
+        sources_hash: str,
+        now: str | None = None,
     ) -> CollectionResult:
         started_at = now or _now()
         source_run_id = self._repository.start_source_run(
-            source.name, started_at, run_id=run_id
+            source.name, started_at, run_id=run_id, sources_hash=sources_hash
         )
         try:
             fetched = source.fetch()

@@ -147,6 +147,48 @@ CREATE TABLE sources_snapshots (
 ) STRICT;
 """
 
+_LEGACY_SOURCES_SNAPSHOT = (
+    b'{"schema_version":0,"status":"unavailable","reason":'
+    b'"source configuration predates durable correlation"}'
+)
+_LEGACY_SOURCES_HASH = (
+    "aa374f95cb38ced06ca7350ec2bf7c123d74a3d335f1e92c182bf99f67e2d559"
+)
+
+_MIGRATION_3 = f"""
+INSERT INTO sources_snapshots(sources_hash, snapshot_bytes, created_at)
+VALUES (
+    '{_LEGACY_SOURCES_HASH}',
+    X'{_LEGACY_SOURCES_SNAPSHOT.hex()}',
+    strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+)
+ON CONFLICT(sources_hash) DO NOTHING;
+
+CREATE TABLE source_runs_v3 (
+    id INTEGER PRIMARY KEY,
+    run_key TEXT NOT NULL UNIQUE,
+    source_name TEXT NOT NULL,
+    sources_hash TEXT NOT NULL REFERENCES sources_snapshots(sources_hash),
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+    receipt_json BLOB,
+    error TEXT
+) STRICT;
+
+INSERT INTO source_runs_v3(
+    id, run_key, source_name, sources_hash, started_at, finished_at,
+    status, receipt_json, error
+)
+SELECT
+    id, run_key, source_name, '{_LEGACY_SOURCES_HASH}', started_at, finished_at,
+    status, receipt_json, error
+FROM source_runs;
+
+DROP TABLE source_runs;
+ALTER TABLE source_runs_v3 RENAME TO source_runs;
+"""
+
 
 class SQLiteRepository:
     """SQLite-backed durable history for a single career monitor installation."""
@@ -196,8 +238,27 @@ class SQLiteRepository:
                 + "COMMIT;"
             )
             version = 2
-        if version != 2:
+        if version == 2:
+            self._connection.executescript(
+                "PRAGMA foreign_keys = OFF;\n"
+                + "BEGIN IMMEDIATE;\n"
+                + _MIGRATION_3
+                + "\n"
+                + "INSERT INTO schema_migrations(version, applied_at) "
+                + "VALUES (3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));\n"
+                + "PRAGMA user_version = 3;\n"
+                + "COMMIT;\n"
+                + "PRAGMA foreign_keys = ON;"
+            )
+            version = 3
+        if version != 3:
             raise RepositoryError(f"unsupported SQLite schema version: {version}")
+        legacy = self._connection.execute(
+            "SELECT snapshot_bytes FROM sources_snapshots WHERE sources_hash = ?",
+            (_LEGACY_SOURCES_HASH,),
+        ).fetchone()
+        if legacy is None or bytes(legacy[0]) != _LEGACY_SOURCES_SNAPSHOT:
+            raise RepositoryError("legacy sources snapshot content is invalid")
 
     @property
     def foreign_keys_enabled(self) -> bool:
@@ -290,22 +351,31 @@ class SQLiteRepository:
             os.close(lock_fd)
 
     def start_source_run(
-        self, source_name: str, started_at: str, *, run_id: str
+        self,
+        source_name: str,
+        started_at: str,
+        *,
+        run_id: str,
+        sources_hash: str = _LEGACY_SOURCES_HASH,
     ) -> int:
-        if not source_name or not started_at or not run_id:
-            raise RepositoryError("source name, start time, and run ID are required")
+        if not source_name or not started_at or not run_id or not sources_hash:
+            raise RepositoryError(
+                "source name, start time, run ID, and sources hash are required"
+            )
         self._connection.execute(
-            "INSERT INTO source_runs(run_key, source_name, started_at, status) "
-            "VALUES (?, ?, ?, 'running') "
+            "INSERT INTO source_runs"
+            "(run_key, source_name, sources_hash, started_at, status) "
+            "VALUES (?, ?, ?, ?, 'running') "
             "ON CONFLICT(run_key) DO NOTHING",
-            (run_id, source_name, started_at),
+            (run_id, source_name, sources_hash, started_at),
         )
         row = self._connection.execute(
-            "SELECT id, source_name, started_at FROM source_runs WHERE run_key = ?",
+            "SELECT id, source_name, started_at, sources_hash "
+            "FROM source_runs WHERE run_key = ?",
             (run_id,),
         ).fetchone()
         assert row is not None
-        if row[1:] != (source_name, started_at):
+        if row[1:] != (source_name, started_at, sources_hash):
             raise RepositoryError("run ID already identifies a different source run")
         return int(row[0])
 
@@ -548,7 +618,7 @@ class SQLiteRepository:
     def get_source_run(self, source_run_id: int) -> StoredSourceRun:
         row = self._connection.execute(
             "SELECT id, run_key, source_name, started_at, finished_at, status, "
-            "receipt_json, error FROM source_runs WHERE id = ?",
+            "receipt_json, error, sources_hash FROM source_runs WHERE id = ?",
             (source_run_id,),
         ).fetchone()
         if row is None:
@@ -562,6 +632,7 @@ class SQLiteRepository:
             status=cast(str, row[5]),  # type: ignore[arg-type]
             receipt=None if row[6] is None else bytes(row[6]),
             error=None if row[7] is None else str(row[7]),
+            sources_hash=str(row[8]),
         )
 
     def get_job(self, source_name: str, source_job_id: str) -> StoredJob:
@@ -709,12 +780,19 @@ class SQLiteRepository:
             "sources_snapshots",
             "strategy_snapshots",
         )
-        return {
+        counts = {
             table: int(
                 self._connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
             )
             for table in tables
         }
+        counts["sources_snapshots"] -= int(
+            self._connection.execute(
+                "SELECT count(*) FROM sources_snapshots WHERE sources_hash = ?",
+                (_LEGACY_SOURCES_HASH,),
+            ).fetchone()[0]
+        )
+        return counts
 
     def store_report(self, key: str, content: bytes, created_at: str) -> int:
         return self._store_keyed_artifact(

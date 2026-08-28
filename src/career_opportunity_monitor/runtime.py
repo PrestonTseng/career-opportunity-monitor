@@ -155,6 +155,7 @@ def run(
                 "error": str(exc),
                 "failed_at": finished_at,
                 "run_id": run_id,
+                "sources_hash": configuration.sources_hash,
                 "status": "failed",
             },
         )
@@ -215,6 +216,7 @@ def _run_daily(
             collection = service.collect(
                 configured_source,
                 run_id=f"{run_id}:source:{configured_source.name}",
+                sources_hash=loaded.sources_hash,
                 now=finished_at,
             )
         except SourceError as exc:

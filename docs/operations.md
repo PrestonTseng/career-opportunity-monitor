@@ -74,7 +74,7 @@ Do not use a newer database with an older image unless that revision documents c
 
 ## Source failures
 
-The NVIDIA source receipt records listed, accepted, request, and failure counts. The report shows `partial` when some source items fail.
+Each configured source receipt records listed, accepted, request, and failure counts. The report shows `partial` when some source items fail.
 
 If the source is partial, examine each failure in the report. Do not treat the omitted source jobs as closed.
 
