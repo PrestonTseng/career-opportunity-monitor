@@ -120,14 +120,12 @@ class DailyReportService:
             display_limit=display_limit,
         )
         self._repository.store_report(f"daily:{report_date}", content, created_at)
-        for delivery in deliveries:
-            _deliver(delivery, content)
+        _deliver_all(deliveries, content)
         return content
 
     def retry_delivery(self, key: str, deliveries: tuple[Delivery, ...]) -> bytes:
         content = self._repository.get_report(key)
-        for delivery in deliveries:
-            _deliver(delivery, content)
+        _deliver_all(deliveries, content)
         return content
 
 
@@ -338,6 +336,20 @@ def _deliver(delivery: Delivery, content: bytes) -> None:
         delivery.deliver(content)
     except OSError as exc:
         raise DeliveryError(f"delivery failed: {exc}") from exc
+
+
+def _deliver_all(deliveries: tuple[Delivery, ...], content: bytes) -> None:
+    failures: list[DeliveryError] = []
+    for delivery in deliveries:
+        try:
+            _deliver(delivery, content)
+        except DeliveryError as exc:
+            failures.append(exc)
+    if len(failures) == 1:
+        raise failures[0]
+    if failures:
+        details = "; ".join(str(failure) for failure in failures)
+        raise DeliveryError(f"{len(failures)} deliveries failed: {details}")
 
 
 def _json_bytes(value: object) -> bytes:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 from dataclasses import dataclass, field
@@ -19,7 +20,7 @@ from career_opportunity_monitor.discord_delivery import (
     read_discord_webhook_url,
     request_discord,
 )
-from career_opportunity_monitor.reporting import DeliveryError
+from career_opportunity_monitor.reporting import DailyReportService, DeliveryError
 
 
 @dataclass
@@ -34,14 +35,11 @@ class EvidenceRepository:
         chunk_index: int,
         chunk_hash: str,
     ) -> bool:
-        return any(
-            row["report_key"] == report_key
-            and row["report_hash"] == report_hash
-            and row["destination_id"] == destination_id
-            and row["chunk_index"] == chunk_index
-            and row["chunk_hash"] == chunk_hash
-            and row["status"] == "acknowledged"
-            for row in self.attempts
+        return (
+            self._delivery_chunk_state(
+                report_key, report_hash, destination_id, chunk_index, chunk_hash
+            )
+            == "acknowledged"
         )
 
     def record_delivery_attempt(self, **values: object) -> None:
@@ -55,15 +53,52 @@ class EvidenceRepository:
         chunk_index: int,
         chunk_hash: str,
     ) -> bool:
-        return any(
-            row["report_key"] == report_key
+        return (
+            self._delivery_chunk_state(
+                report_key, report_hash, destination_id, chunk_index, chunk_hash
+            )
+            == "indeterminate"
+        )
+
+    def _delivery_chunk_state(
+        self,
+        report_key: str,
+        report_hash: str,
+        destination_id: str,
+        chunk_index: int,
+        chunk_hash: str,
+    ) -> object | None:
+        matching = [
+            row
+            for row in self.attempts
+            if row["report_key"] == report_key
             and row["report_hash"] == report_hash
             and row["destination_id"] == destination_id
             and row["chunk_index"] == chunk_index
             and row["chunk_hash"] == chunk_hash
-            and row["idempotency_state"] == "indeterminate"
-            for row in self.attempts
-        )
+        ]
+        return matching[-1]["idempotency_state"] if matching else None
+
+
+@dataclass
+class FailingResolutionRepository(EvidenceRepository):
+    def record_delivery_attempt(self, **values: object) -> None:
+        if values["idempotency_state"] == "acknowledged":
+            raise OSError("simulated final evidence write failure")
+        super().record_delivery_attempt(**values)
+
+
+@dataclass
+class ReportEvidenceRepository(EvidenceRepository):
+    reports: dict[str, bytes] = field(default_factory=dict[str, bytes])
+
+    def store_report(self, key: str, content: bytes, created_at: str) -> int:
+        existing = self.reports.setdefault(key, content)
+        assert existing == content
+        return 1
+
+    def get_report(self, key: str) -> bytes:
+        return self.reports[key]
 
 
 @dataclass
@@ -170,7 +205,18 @@ def test_delivery_records_acknowledged_chunks_without_secret_data(
         " worl",
         "d",
     ]
-    assert all(row["status"] == "acknowledged" for row in repository.attempts)
+    assert [row["status"] for row in repository.attempts] == [
+        "failed",
+        "acknowledged",
+        "failed",
+        "acknowledged",
+        "failed",
+        "acknowledged",
+    ]
+    assert all(
+        row["idempotency_state"] == "indeterminate" and row["http_class"] == "not_sent"
+        for row in repository.attempts[::2]
+    )
     evidence = repr(repository.attempts)
     assert "TOKEN" not in evidence
     assert all(row["chunk_count"] == 3 for row in repository.attempts)
@@ -223,8 +269,11 @@ def test_5xx_and_429_retry_then_acknowledge(tmp_path: Path) -> None:
     delivery.deliver(b"report")
 
     assert [row["status"] for row in repository.attempts] == [
+        "failed",
         "retryable_failure",
+        "failed",
         "rate_limited",
+        "failed",
         "acknowledged",
     ]
     assert sleeps == [0.25]
@@ -253,6 +302,146 @@ def test_timeout_is_indeterminate_and_never_silently_retried(tmp_path: Path) -> 
     assert len(requester.payloads) == 1
     assert repository.attempts[-1]["idempotency_state"] == "indeterminate"
     assert "TOKEN" not in repr(repository.attempts)
+
+
+def test_acknowledged_request_with_failed_final_evidence_is_never_resent(
+    tmp_path: Path,
+) -> None:
+    repository = FailingResolutionRepository()
+    first_requester = ScriptedRequester([DiscordResponse(204, b"")])
+    first = DiscordDelivery(
+        destination_id="alerts",
+        report_key="daily:x",
+        webhook_url_file=_secret(tmp_path),
+        repository=repository,
+        requester=first_requester,
+        retries=0,
+    )
+
+    with pytest.raises(OSError, match="final evidence write failure"):
+        first.deliver(b"report")
+
+    retry_requester = ScriptedRequester([])
+    retry = DiscordDelivery(
+        destination_id="alerts",
+        report_key="daily:x",
+        webhook_url_file=_secret(tmp_path),
+        repository=repository,
+        requester=retry_requester,
+        retries=0,
+    )
+    with pytest.raises(DeliveryError, match="indeterminate"):
+        retry.deliver(b"report")
+
+    assert len(first_requester.payloads) == 1
+    assert retry_requester.payloads == []
+    assert repository.attempts[-1]["idempotency_state"] == "indeterminate"
+
+
+def test_malformed_success_response_is_indeterminate_and_never_resent(
+    tmp_path: Path,
+) -> None:
+    repository = EvidenceRepository()
+    requester = ScriptedRequester(
+        [DiscordResponse(200, b"unexpected"), DiscordResponse(204, b"")]
+    )
+    delivery = DiscordDelivery(
+        destination_id="alerts",
+        report_key="daily:x",
+        webhook_url_file=_secret(tmp_path),
+        repository=repository,
+        requester=requester,
+        retries=0,
+    )
+
+    with pytest.raises(DeliveryError, match="malformed success"):
+        delivery.deliver(b"report")
+    with pytest.raises(DeliveryError, match="indeterminate"):
+        delivery.deliver(b"report")
+
+    assert len(requester.payloads) == 1
+    assert repository.attempts[-1]["idempotency_state"] == "indeterminate"
+
+
+def test_initial_report_delivery_reaches_later_discord_after_permanent_failure(
+    tmp_path: Path,
+) -> None:
+    repository = ReportEvidenceRepository()
+    failed_requester = ScriptedRequester([DiscordResponse(400, b"")])
+    healthy_requester = ScriptedRequester([DiscordResponse(204, b"")])
+    deliveries = (
+        DiscordDelivery(
+            destination_id="first",
+            report_key="daily:2026-08-29",
+            webhook_url_file=_secret(tmp_path),
+            repository=repository,
+            requester=failed_requester,
+            retries=0,
+        ),
+        DiscordDelivery(
+            destination_id="second",
+            report_key="daily:2026-08-29",
+            webhook_url_file=_secret(tmp_path),
+            repository=repository,
+            requester=healthy_requester,
+            retries=0,
+        ),
+    )
+
+    with pytest.raises(DeliveryError, match="HTTP 400"):
+        DailyReportService(repository).create_and_deliver(
+            report_date="2026-08-29",
+            jobs=(),
+            source_health=(),
+            display_limit=0,
+            created_at="2026-08-29T00:00:00Z",
+            deliveries=deliveries,
+        )
+
+    assert len(failed_requester.payloads) == 1
+    assert len(healthy_requester.payloads) == 1
+    assert repository.delivery_chunk_acknowledged(
+        "daily:2026-08-29",
+        hashlib.sha256(repository.reports["daily:2026-08-29"]).hexdigest(),
+        "second",
+        0,
+        hashlib.sha256(repository.reports["daily:2026-08-29"]).hexdigest(),
+    )
+
+
+def test_stored_report_retry_reaches_later_discord_after_indeterminate_failure(
+    tmp_path: Path,
+) -> None:
+    repository = ReportEvidenceRepository(reports={"daily:x": b"report"})
+    failed_requester = ScriptedRequester([DiscordTransportError("timeout")])
+    healthy_requester = ScriptedRequester([DiscordResponse(204, b"")])
+    deliveries = (
+        DiscordDelivery(
+            destination_id="first",
+            report_key="daily:x",
+            webhook_url_file=_secret(tmp_path),
+            repository=repository,
+            requester=failed_requester,
+            retries=0,
+        ),
+        DiscordDelivery(
+            destination_id="second",
+            report_key="daily:x",
+            webhook_url_file=_secret(tmp_path),
+            repository=repository,
+            requester=healthy_requester,
+            retries=0,
+        ),
+    )
+    service = DailyReportService(repository)
+
+    with pytest.raises(DeliveryError, match="indeterminate"):
+        service.retry_delivery("daily:x", deliveries)
+    with pytest.raises(DeliveryError, match="indeterminate"):
+        service.retry_delivery("daily:x", deliveries)
+
+    assert len(failed_requester.payloads) == 1
+    assert len(healthy_requester.payloads) == 1
 
 
 @pytest.mark.parametrize("body", [b"", b"not-json", b'{"retry_after":"soon"}'])

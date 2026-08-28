@@ -142,6 +142,52 @@ def test_delivery_evidence_persists_indeterminate_transport_state(
     repository.close()
 
 
+def test_later_resolved_evidence_overrides_historical_indeterminate_state(
+    tmp_path: Path,
+) -> None:
+    repository = SQLiteRepository(tmp_path / "history.sqlite3")
+    repository.store_report("daily:x", b"report", "2026-08-29T00:00:00Z")
+    common = {
+        "report_key": "daily:x",
+        "report_hash": "a" * 64,
+        "destination_id": "discord-alerts",
+        "chunk_index": 0,
+        "chunk_count": 1,
+        "chunk_hash": "b" * 64,
+        "attempted_at": "2026-08-29T00:00:00Z",
+    }
+    repository.record_delivery_attempt(
+        **common,
+        status="failed",
+        http_class="not_sent",
+        idempotency_state="indeterminate",
+    )
+    repository.record_delivery_attempt(
+        **common,
+        status="retryable_failure",
+        http_class="5xx",
+        idempotency_state="pending",
+    )
+
+    assert not repository.delivery_chunk_indeterminate(
+        "daily:x", "a" * 64, "discord-alerts", 0, "b" * 64
+    )
+
+    repository.record_delivery_attempt(
+        **common,
+        status="acknowledged",
+        http_class="2xx",
+        idempotency_state="acknowledged",
+    )
+    assert repository.delivery_chunk_acknowledged(
+        "daily:x", "a" * 64, "discord-alerts", 0, "b" * 64
+    )
+    assert not repository.delivery_chunk_indeterminate(
+        "daily:x", "a" * 64, "discord-alerts", 0, "b" * 64
+    )
+    repository.close()
+
+
 def test_existing_schema_v4_delivery_evidence_migrates_without_loss(
     tmp_path: Path,
 ) -> None:

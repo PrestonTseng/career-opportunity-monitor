@@ -357,6 +357,15 @@ class DiscordDelivery:
         ).encode("utf-8")
         for attempt in range(self._retries + 1):
             status: int | None = None
+            self._record(
+                report_hash,
+                chunk_index,
+                chunk_count,
+                chunk_hash,
+                status="failed",
+                http_class="not_sent",
+                idempotency_state="indeterminate",
+            )
             try:
                 response = self._requester(self._url, payload, self._timeout_seconds)
                 status = response.status
@@ -384,7 +393,7 @@ class DiscordDelivery:
                         chunk_hash,
                         status="failed",
                         http_class=http_class,
-                        idempotency_state="pending",
+                        idempotency_state="indeterminate",
                     )
                     raise DeliveryError("Discord returned a malformed success response")
                 self._record(

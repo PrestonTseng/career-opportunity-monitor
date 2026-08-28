@@ -896,13 +896,16 @@ class SQLiteRepository:
         chunk_index: int,
         chunk_hash: str,
     ) -> bool:
-        row = self._connection.execute(
-            "SELECT 1 FROM delivery_attempts WHERE report_key = ? "
-            "AND report_hash = ? AND destination_id = ? AND chunk_index = ? "
-            "AND chunk_hash = ? AND status = 'acknowledged' LIMIT 1",
-            (report_key, report_hash, destination_id, chunk_index, chunk_hash),
-        ).fetchone()
-        return row is not None
+        return (
+            self._delivery_chunk_state(
+                report_key,
+                report_hash,
+                destination_id,
+                chunk_index,
+                chunk_hash,
+            )
+            == "acknowledged"
+        )
 
     def delivery_chunk_indeterminate(
         self,
@@ -912,13 +915,32 @@ class SQLiteRepository:
         chunk_index: int,
         chunk_hash: str,
     ) -> bool:
+        return (
+            self._delivery_chunk_state(
+                report_key,
+                report_hash,
+                destination_id,
+                chunk_index,
+                chunk_hash,
+            )
+            == "indeterminate"
+        )
+
+    def _delivery_chunk_state(
+        self,
+        report_key: str,
+        report_hash: str,
+        destination_id: str,
+        chunk_index: int,
+        chunk_hash: str,
+    ) -> str | None:
         row = self._connection.execute(
-            "SELECT 1 FROM delivery_attempts WHERE report_key = ? "
+            "SELECT idempotency_state FROM delivery_attempts WHERE report_key = ? "
             "AND report_hash = ? AND destination_id = ? AND chunk_index = ? "
-            "AND chunk_hash = ? AND idempotency_state = 'indeterminate' LIMIT 1",
+            "AND chunk_hash = ? ORDER BY id DESC LIMIT 1",
             (report_key, report_hash, destination_id, chunk_index, chunk_hash),
         ).fetchone()
-        return row is not None
+        return None if row is None else str(row[0])
 
     def record_delivery_attempt(self, **values: object) -> None:
         report_key = values.get("report_key")
