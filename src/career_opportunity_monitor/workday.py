@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from html import unescape
-from http.client import HTTPMessage, HTTPSConnection
+from http.client import HTTPException, HTTPMessage, HTTPSConnection
 from typing import IO, Protocol, cast
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request
@@ -114,6 +114,10 @@ class UrlLibTransport:
                 if response.status >= 400:
                     raise SourceError(f"request failed with HTTP {response.status}")
                 payload = response.read(self._response_limit_bytes + 1)
+            except HTTPException as exc:
+                raise SourceError(
+                    "request failed due to invalid HTTP response"
+                ) from exc
             except (OSError, TimeoutError) as exc:
                 raise SourceError(f"request failed: {exc}") from exc
             finally:

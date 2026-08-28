@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import json
 import shutil
+import socket
 import stat
 from dataclasses import dataclass
+from http.client import BadStatusLine
 from pathlib import Path
+from typing import Never
+from unittest.mock import patch
 
 import pytest
 
@@ -13,7 +17,7 @@ from career_opportunity_monitor.repository import SourceObservation
 from career_opportunity_monitor.runtime import run
 from career_opportunity_monitor.source import SourceError, SourceFetchResult
 from career_opportunity_monitor.sqlite_repository import SQLiteRepository
-from career_opportunity_monitor.workday import WorkdaySource
+from career_opportunity_monitor.workday import UrlLibTransport, WorkdaySource
 
 ROOT = Path(__file__).parents[1]
 
@@ -159,6 +163,19 @@ class MalformedExternalPathTransport:
         return b'{"total":1,"jobPostings":[{"externalPath":"https://["}]}'
 
 
+class BadStatusLineConnection:
+    def request(
+        self, method: str, path: str, body: bytes | None, headers: dict[str, str]
+    ) -> None:
+        return None
+
+    def getresponse(self) -> Never:
+        raise BadStatusLine("ATTACKER-CONTROLLED-STATUS-LINE")
+
+    def close(self) -> None:
+        return None
+
+
 def test_daily_collects_configured_sources_in_order_and_isolates_one_failure(
     tmp_path: Path,
 ) -> None:
@@ -247,6 +264,73 @@ def test_daily_isolates_malformed_workday_data_between_valid_sources(
     malformed_receipt = json.loads(malformed_run.receipt)
     assert malformed_receipt["partial"] is True
     assert "unsafe externalPath" in malformed_receipt["failures"][0]
+    repository.close()
+
+
+def test_daily_isolates_bad_http_response_between_valid_sources(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    environment = _runtime_environment(tmp_path)
+    environment["CAREER_MONITOR_RUN_ID"] = "bad-http-middle"
+    environment["CAREER_MONITOR_NOW"] = "2026-08-27T03:30:00Z"
+    malformed = WorkdaySource(
+        name="malformed-workday",
+        origin="https://malformed.example.com",
+        tenant="malformed",
+        site="ExternalCareerSite",
+        company="Malformed Example",
+        search_text="Taiwan",
+        transport=UrlLibTransport(
+            approved_origin="https://malformed.example.com",
+            timeout_seconds=10,
+            response_limit_bytes=1_000_000,
+            connection_factory=lambda host, address, timeout: BadStatusLineConnection(),
+        ),
+        retries=0,
+    )
+
+    with patch(
+        "career_opportunity_monitor.workday.socket.getaddrinfo",
+        return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))],
+    ):
+        exit_code = run(
+            ("daily",),
+            environment=environment,
+            sources=(
+                FixtureSource("first-workday"),
+                malformed,
+                FixtureSource("second-workday"),
+            ),
+        )
+
+    assert exit_code == 0
+    data_directory = Path(environment["CAREER_MONITOR_DATA_DIR"])
+    report = (data_directory / "reports" / "daily-2026-08-27.md").read_text()
+    assert report.index("- first-workday.") < report.index("- malformed-workday.")
+    assert report.index("- malformed-workday.") < report.index("- second-workday.")
+    receipt_text = (
+        data_directory / "receipts" / "daily-bad-http-middle.json"
+    ).read_text()
+    receipt = json.loads(receipt_text)
+    assert receipt["accepted"] == 2
+    assert receipt["source_failures"] == 1
+    repository = SQLiteRepository(data_directory / "history.sqlite3")
+    source_runs = [repository.get_source_run(index) for index in (1, 2, 3)]
+    assert [source_run.status for source_run in source_runs] == [
+        "completed",
+        "failed",
+        "completed",
+    ]
+    malformed_run = source_runs[1]
+    assert malformed_run.sources_hash == receipt["sources_hash"]
+    assert malformed_run.error == (
+        "source collection failed: list page 0: "
+        "request failed due to invalid HTTP response"
+    )
+    captured = capsys.readouterr()
+    assert "ATTACKER-CONTROLLED" not in "".join(
+        (report, receipt_text, malformed_run.error, captured.out, captured.err)
+    )
     repository.close()
 
 

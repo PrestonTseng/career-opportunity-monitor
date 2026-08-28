@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import json
 import socket
-from http.client import HTTPMessage
+from http.client import BadStatusLine, HTTPMessage, IncompleteRead
 from unittest.mock import patch
 from urllib.request import Request
 
@@ -191,6 +191,21 @@ class _MalformedRedirectConnection:
         return None
 
 
+class _BadStatusLineConnection(_Connection):
+    def getresponse(self) -> _Response:
+        raise BadStatusLine("ATTACKER-CONTROLLED-STATUS-LINE")
+
+
+class _IncompleteResponse(_Response):
+    def read(self, amount: int) -> bytes:
+        raise IncompleteRead(b"ATTACKER-CONTROLLED-BODY", 100)
+
+
+class _IncompleteResponseConnection(_Connection):
+    def getresponse(self) -> _IncompleteResponse:
+        return _IncompleteResponse()
+
+
 def test_transport_pins_the_public_dns_answer_used_by_the_safety_check() -> None:
     connected: list[tuple[str, str]] = []
 
@@ -231,3 +246,30 @@ def test_transport_normalizes_a_malformed_redirect_location_to_source_error() ->
         pytest.raises(SourceError, match="invalid redirect"),
     ):
         transport.request("https://jobs.example.com/path", None)
+
+
+@pytest.mark.parametrize(
+    "connection",
+    (_BadStatusLineConnection(), _IncompleteResponseConnection()),
+    ids=("bad-status-line", "incomplete-response"),
+)
+def test_transport_sanitizes_http_protocol_failures(connection: _Connection) -> None:
+    transport = UrlLibTransport(
+        approved_origin="https://jobs.example.com",
+        timeout_seconds=10,
+        response_limit_bytes=100,
+        connection_factory=lambda host, address, timeout: connection,
+    )
+
+    with (
+        patch(
+            "career_opportunity_monitor.workday.socket.getaddrinfo",
+            return_value=_public_dns_answer(),
+        ),
+        pytest.raises(
+            SourceError, match=r"^request failed due to invalid HTTP response$"
+        ) as raised,
+    ):
+        transport.request("https://jobs.example.com/path", None)
+
+    assert "ATTACKER-CONTROLLED" not in str(raised.value)
