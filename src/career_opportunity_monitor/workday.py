@@ -104,7 +104,12 @@ class UrlLibTransport:
                         raise SourceError("source returned an invalid redirect")
                     try:
                         current_url = urljoin(current_url, location)
+                        _assert_approved_origin(current_url, self._approved_origin)
                     except ValueError as exc:
+                        raise SourceError(
+                            "source returned an invalid redirect"
+                        ) from exc
+                    except SourceError as exc:
                         raise SourceError(
                             "source returned an invalid redirect"
                         ) from exc
@@ -168,7 +173,7 @@ def _origin(value: str) -> str:
     return f"https://{parsed.hostname}"
 
 
-def validate_approved_url(url: str, approved_origin: str) -> tuple[str, ...]:
+def _assert_approved_origin(url: str, approved_origin: str) -> str:
     try:
         parsed = urlsplit(url)
     except ValueError as exc:
@@ -185,8 +190,14 @@ def validate_approved_url(url: str, approved_origin: str) -> tuple[str, ...]:
         or f"{parsed.scheme}://{parsed.netloc}" != approved_origin
     ):
         raise SourceError("request URL is outside the configured approved origin")
+    assert parsed.hostname is not None
+    return parsed.hostname
+
+
+def validate_approved_url(url: str, approved_origin: str) -> tuple[str, ...]:
+    hostname = _assert_approved_origin(url, approved_origin)
     try:
-        answers = socket.getaddrinfo(parsed.hostname, 443, type=socket.SOCK_STREAM)
+        answers = socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
     except OSError as exc:
         raise SourceError("approved source host could not be resolved safely") from exc
     addresses = {str(answer[4][0]) for answer in answers}

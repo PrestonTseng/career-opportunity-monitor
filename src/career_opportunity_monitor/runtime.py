@@ -37,6 +37,83 @@ from .sqlite_repository import SQLiteRepository
 _DEFAULT_RESUME_PATH = "/profile/resume_facts.yaml"
 _DEFAULT_CONFIG_DIR = "/config"
 _DEFAULT_DATA_DIR = "/data"
+_PUBLIC_EXAMPLE_PROFILE_ID = "alex-chen-fictional"
+_PUBLIC_EXAMPLE_STRATEGY_ID = "taiwan-software-fictional"
+
+
+def _runtime_mode(environment: Mapping[str, str]) -> str:
+    mode = environment.get("CAREER_MONITOR_MODE", "production")
+    if mode not in ("demo", "production"):
+        raise ConfigError("CAREER_MONITOR_MODE must be demo or production")
+    return mode
+
+
+def _reject_public_examples(configuration: LoadedConfiguration, mode: str) -> None:
+    if mode == "demo":
+        return
+    if (
+        configuration.profile.profile_id == _PUBLIC_EXAMPLE_PROFILE_ID
+        or configuration.strategy.strategy_id == _PUBLIC_EXAMPLE_STRATEGY_ID
+    ):
+        raise ConfigError(
+            "production mode cannot use the public fictional examples; "
+            "mount private inputs or set CAREER_MONITOR_MODE=demo"
+        )
+
+
+def _configuration_summary(
+    configuration: LoadedConfiguration,
+    *,
+    mode: str,
+    resume_path: Path,
+    config_directory: Path,
+    data_directory: Path,
+) -> dict[str, object]:
+    return {
+        "command": "validate",
+        "destinations": [
+            {
+                "enabled": destination.enabled,
+                "id": destination.id,
+                "report_cadences": list(destination.report_cadences),
+                "type": destination.type,
+            }
+            for destination in configuration.destinations
+        ],
+        "mode": mode,
+        "paths": {
+            "configuration_directory": str(config_directory),
+            "data_directory": str(data_directory),
+            "resume_file": str(resume_path),
+        },
+        "schedule": {
+            "daily": {
+                "cron": configuration.schedule.daily.cron,
+                "enabled": configuration.schedule.daily.enabled,
+            },
+            "timezone": configuration.schedule.timezone,
+            "weekly": {
+                "cron": configuration.schedule.weekly.cron,
+                "enabled": configuration.schedule.weekly.enabled,
+            },
+        },
+        "schema_versions": {
+            "destinations": 1,
+            "resume_facts": 1,
+            "schedule": 1,
+            "sources": 1,
+            "strategy": 1,
+        },
+        "sources": [
+            {
+                "adapter": source.adapter,
+                "enabled": source.enabled,
+                "id": source.id,
+            }
+            for source in configuration.sources
+        ],
+        "status": "ok",
+    }
 
 
 def run(
@@ -47,17 +124,34 @@ def run(
     sources: Sequence[JobSource] | None = None,
 ) -> int:
     """Run one profile-gated container role."""
-    parser = argparse.ArgumentParser(prog="career-monitor")
+    parser = argparse.ArgumentParser(
+        prog="career-monitor",
+        description="Validate configuration or create and deliver career reports.",
+    )
     parser.add_argument(
         "command",
         choices=("validate", "daily", "retry-delivery", "render-schedule", "weekly"),
+        help="Role to run. Validate prints a secret-safe configuration summary.",
     )
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--report-date")
-    parser.add_argument("--cadence", choices=("daily", "weekly"), default="daily")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Validate and write a receipt only."
+    )
+    parser.add_argument(
+        "--report-date", help="Stored report date for retry-delivery (YYYY-MM-DD)."
+    )
+    parser.add_argument(
+        "--cadence",
+        choices=("daily", "weekly"),
+        default="daily",
+        help="Stored report cadence for retry-delivery.",
+    )
     arguments = parser.parse_args(argv)
     values = os.environ if environment is None else environment
     data_directory = Path(values.get("CAREER_MONITOR_DATA_DIR", _DEFAULT_DATA_DIR))
+    resume_path = Path(values.get("CAREER_MONITOR_RESUME_PATH", _DEFAULT_RESUME_PATH))
+    config_directory = Path(
+        values.get("CAREER_MONITOR_CONFIG_DIR", _DEFAULT_CONFIG_DIR)
+    )
     run_id = values.get("CAREER_MONITOR_RUN_ID", uuid.uuid4().hex)
     finished_at = values.get("CAREER_MONITOR_NOW", _now())
     if source is not None and sources is not None:
@@ -66,9 +160,11 @@ def run(
     try:
         _validate_data_directory(data_directory)
         configuration = load_configuration(
-            Path(values.get("CAREER_MONITOR_RESUME_PATH", _DEFAULT_RESUME_PATH)),
-            Path(values.get("CAREER_MONITOR_CONFIG_DIR", _DEFAULT_CONFIG_DIR)),
+            resume_path,
+            config_directory,
         )
+        mode = _runtime_mode(values)
+        _reject_public_examples(configuration, mode)
     except (ConfigError, OSError, ValueError) as exc:
         _try_write_error(
             data_directory,
@@ -83,22 +179,13 @@ def run(
     if arguments.command == "validate":
         print(
             _json_text(
-                {
-                    "command": arguments.command,
-                    "configured_sources": len(configuration.sources),
-                    "configured_destinations": len(configuration.destinations),
-                    "enabled_destination_ids": [
-                        destination.id
-                        for destination in configuration.destinations
-                        if destination.enabled
-                    ],
-                    "enabled_source_ids": [
-                        source.id for source in configuration.sources if source.enabled
-                    ],
-                    "profile_id": configuration.profile.profile_id,
-                    "status": "ok",
-                    "strategy_id": configuration.strategy.strategy_id,
-                }
+                _configuration_summary(
+                    configuration,
+                    mode=mode,
+                    resume_path=resume_path,
+                    config_directory=config_directory,
+                    data_directory=data_directory,
+                )
             )
         )
         return 0

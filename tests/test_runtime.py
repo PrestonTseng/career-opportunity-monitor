@@ -37,6 +37,7 @@ def _runtime_environment(tmp_path: Path) -> dict[str, str]:
         "CAREER_MONITOR_RESUME_PATH": str(profile_directory / "resume_facts.yaml"),
         "CAREER_MONITOR_CONFIG_DIR": str(config_directory),
         "CAREER_MONITOR_DATA_DIR": str(data_directory),
+        "CAREER_MONITOR_MODE": "demo",
     }
 
 
@@ -51,14 +52,94 @@ def test_validate_accepts_valid_runtime_mounts(
     output = json.loads(capsys.readouterr().out)
     assert output == {
         "command": "validate",
-        "configured_destinations": 1,
-        "configured_sources": 2,
-        "enabled_destination_ids": [],
-        "enabled_source_ids": ["example-workday"],
-        "profile_id": "alex-chen-fictional",
+        "destinations": [
+            {
+                "enabled": False,
+                "id": "discord-alerts-example",
+                "report_cadences": ["daily"],
+                "type": "discord",
+            }
+        ],
+        "mode": "demo",
+        "paths": {
+            "configuration_directory": environment["CAREER_MONITOR_CONFIG_DIR"],
+            "data_directory": environment["CAREER_MONITOR_DATA_DIR"],
+            "resume_file": environment["CAREER_MONITOR_RESUME_PATH"],
+        },
+        "schedule": {
+            "daily": {"cron": "0 0 * * *", "enabled": True},
+            "timezone": "Asia/Taipei",
+            "weekly": {"cron": "0 1 * * 1", "enabled": True},
+        },
+        "schema_versions": {
+            "destinations": 1,
+            "resume_facts": 1,
+            "schedule": 1,
+            "sources": 1,
+            "strategy": 1,
+        },
+        "sources": [
+            {"adapter": "workday", "enabled": True, "id": "example-workday"},
+            {"adapter": "workday", "enabled": True, "id": "second-example-workday"},
+        ],
         "status": "ok",
-        "strategy_id": "taiwan-software-fictional",
     }
+
+
+def test_production_mode_rejects_public_fictional_configuration(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    environment = _runtime_environment(tmp_path)
+    environment.pop("CAREER_MONITOR_MODE")
+
+    exit_code = run(("validate",), environment=environment)
+
+    assert exit_code == 2
+    captured = capsys.readouterr()
+    assert "public fictional examples" in captured.err
+    assert captured.out == ""
+
+
+def test_validate_summary_does_not_disclose_private_values(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    environment = _runtime_environment(tmp_path)
+    resume_path = Path(environment["CAREER_MONITOR_RESUME_PATH"])
+    private_statement = "PRIVATE-RESUME-SENTINEL"
+    resume_path.write_text(
+        resume_path.read_text(encoding="utf-8").replace(
+            "Builds tested Python services", private_statement
+        ),
+        encoding="utf-8",
+    )
+    strategy_path = Path(environment["CAREER_MONITOR_CONFIG_DIR"]) / "strategy.yaml"
+    private_strategy = "PRIVATE-STRATEGY-SENTINEL"
+    strategy_path.write_text(
+        strategy_path.read_text(encoding="utf-8").replace(
+            "Software Engineer", private_strategy
+        ),
+        encoding="utf-8",
+    )
+    secret = "https://discord.com/api/webhooks/123456789/private-secret"
+    secret_path = tmp_path / "discord-webhook"
+    secret_path.write_text(secret + "\n", encoding="utf-8")
+    destinations_path = (
+        Path(environment["CAREER_MONITOR_CONFIG_DIR"]) / "destinations.yaml"
+    )
+    destinations_path.write_text(
+        destinations_path.read_text(encoding="utf-8")
+        .replace("enabled: false", "enabled: true")
+        .replace("/run/secrets/discord-webhook", str(secret_path)),
+        encoding="utf-8",
+    )
+
+    assert run(("validate",), environment=environment) == 0
+
+    output = capsys.readouterr().out
+    assert private_statement not in output
+    assert private_strategy not in output
+    assert secret not in output
+    assert str(secret_path) not in output
 
 
 def test_daily_dry_run_writes_a_quiet_receipt(

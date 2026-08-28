@@ -23,6 +23,8 @@ x-runtime: &runtime
     CAREER_MONITOR_LLM_RETRIES: ${CAREER_MONITOR_LLM_RETRIES:-0}
     CAREER_MONITOR_LLM_TIMEOUT_SECONDS: ${CAREER_MONITOR_LLM_TIMEOUT_SECONDS:-10}
     CAREER_MONITOR_LOCK_TIMEOUT_SECONDS: ${CAREER_MONITOR_LOCK_TIMEOUT_SECONDS:-0.25}
+    # Use demo only for the public fictional acceptance flow.
+    CAREER_MONITOR_MODE: ${CAREER_MONITOR_MODE:-production}
     CAREER_MONITOR_RESUME_PATH: /profile/resume_facts.yaml
   secrets:
     - source: llm-api-key
@@ -31,11 +33,11 @@ x-runtime: &runtime
       target: discord-webhook
   volumes:
     - type: bind
-      source: ${CAREER_MONITOR_RESUME_FILE:-./examples/resume_facts.yaml}
+      source: ${CAREER_MONITOR_RESUME_FILE:-./private/resume_facts.yaml}
       target: /profile/resume_facts.yaml
       read_only: true
     - type: bind
-      source: ${CAREER_MONITOR_CONFIG_DIR:-./examples/strategy/v1}
+      source: ${CAREER_MONITOR_CONFIG_DIR:-./private/config}
       target: /config
       read_only: true
     - type: volume
@@ -53,11 +55,11 @@ services:
       - /usr/local/bin/career-monitor-scheduler
     volumes:
       - type: bind
-        source: ${CAREER_MONITOR_RESUME_FILE:-./examples/resume_facts.yaml}
+        source: ${CAREER_MONITOR_RESUME_FILE:-./private/resume_facts.yaml}
         target: /profile/resume_facts.yaml
         read_only: true
       - type: bind
-        source: ${CAREER_MONITOR_CONFIG_DIR:-./examples/strategy/v1}
+        source: ${CAREER_MONITOR_CONFIG_DIR:-./private/config}
         target: /config
         read_only: true
       - type: volume

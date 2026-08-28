@@ -14,6 +14,7 @@ def _compose_environment(tmp_path: Path, project_name: str) -> dict[str, str]:
         **os.environ,
         "CAREER_MONITOR_CONFIG_DIR": str(ROOT / "examples" / "strategy" / "v1"),
         "CAREER_MONITOR_DATA_DIR": str(data_directory),
+        "CAREER_MONITOR_MODE": "demo",
         "CAREER_MONITOR_RESUME_FILE": str(ROOT / "examples" / "resume_facts.yaml"),
         "COMPOSE_PROJECT_NAME": project_name,
     }

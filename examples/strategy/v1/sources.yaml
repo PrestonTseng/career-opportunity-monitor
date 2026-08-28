@@ -16,13 +16,13 @@ sources:
       response_limit_bytes: 1000000
       retries: 1
       rate_limit_seconds: 0
-  - id: nvidia-workday-example
-    enabled: false
+  - id: second-example-workday
+    enabled: true
     adapter: workday
-    origin: https://nvidia.wd5.myworkdayjobs.com
-    tenant: nvidia
-    site: NVIDIAExternalCareerSite
-    company: NVIDIA
+    origin: https://second-example.wd5.myworkdayjobs.com
+    tenant: second-example
+    site: ExampleExternalCareerSite
+    company: Example Cloud
     search_text: Taiwan
     options:
       page_size: 20

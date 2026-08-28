@@ -1,84 +1,105 @@
 # Operations
 
-## Start the scheduler
+## Validate and do a dry run
 
-Validate the private inputs first. Then start the scheduler:
-
-```text
-docker compose --profile scheduler up --detach scheduler
-```
-
-Show scheduler logs:
+Validate private inputs before each live command:
 
 ```text
-docker compose --profile scheduler logs scheduler
+docker compose --profile cli run --rm cli validate
 ```
 
-Stop the scheduler without deleting data:
+Do a dry run before the first live command:
 
 ```text
-docker compose --profile scheduler down
+docker compose --profile cli run --rm cli daily --dry-run
 ```
 
-## Run commands manually
+A dry run reads and validates all selected configuration. It does not contact a source or destination.
 
-Run a daily collection and report:
+## Run reports manually
+
+Run daily collection, scoring, storage, reporting, and delivery:
 
 ```text
 docker compose --profile cli run --rm cli daily
 ```
 
-Run a weekly report from already stored daily report history. This command does
-not recollect jobs. A scheduled Monday run summarizes the prior completed local
-calendar week:
+Build a weekly report from stored daily report history:
 
 ```text
 docker compose --profile cli run --rm cli weekly
 ```
 
-If a report delivery fails, retry the stored report bytes:
+The weekly command does not collect source data. A scheduled Monday run summarizes the prior completed local week.
+
+## Start and stop the scheduler
+
+Start the scheduler after validation and a dry run:
+
+```text
+docker compose --profile scheduler up --detach scheduler
+```
+
+Examine scheduler logs:
+
+```text
+docker compose --profile scheduler logs scheduler
+```
+
+Stop the scheduler without deleting runtime data:
+
+```text
+docker compose --profile scheduler down
+```
+
+## Retry delivery
+
+If daily delivery fails, retry the immutable stored report:
 
 ```text
 docker compose --profile cli run --rm cli retry-delivery --report-date 2026-08-27
 ```
 
-Retry the immutable weekly report whose ID is its local Monday start date:
+Retry a weekly report with its local Monday start date:
 
 ```text
 docker compose --profile cli run --rm cli retry-delivery --cadence weekly --report-date 2026-08-24
 ```
 
-Discord delivery is chunked at the destination limit. Acknowledged chunk hashes
-are stored in SQLite, so a retry resumes at the first unacknowledged chunk. The
-database evidence contains hashes and HTTP classes, never the webhook URL. A
-dry run makes no delivery request and records no successful delivery.
+The monitor stores report bytes before delivery. A retry uses the same stored bytes.
 
-A successful command prints one JSON receipt. A failed command prints an error and exits with a nonzero status.
+Discord delivery stores chunk claims, acknowledgments, and hashes in SQLite. A retry resumes from durable delivery evidence.
 
 ## Backup
 
-Stop the scheduler before you copy the SQLite database. This action prevents a writer from changing the backup.
+1. Stop the scheduler.
+2. Find the Compose volume with `docker volume ls --filter name=career-opportunity-monitor_runtime-data`.
+3. Copy the complete volume to protected storage.
+4. Start the scheduler.
 
-Find the Compose volume:
+The volume contains private resume snapshots, job evidence, reports, receipts, and delivery evidence. Protect the backup as private data.
 
-```text
-docker volume ls --filter name=career-opportunity-monitor_runtime-data
-```
+## Restore
 
-Copy the complete volume to protected storage. Keep the backup private because it contains resume snapshots and job evidence.
+1. Stop the scheduler.
+2. Save the current volume for recovery.
+3. Restore the complete matching backup.
+4. Run an SQLite integrity test in a protected environment.
+5. Run validation and a daily dry run.
+6. Start the scheduler.
 
-Start the scheduler after the copy completes. Do an SQLite integrity test after each restore.
+Do not print private database rows in shared logs.
 
 ## Update
 
 1. Stop the scheduler.
 2. Back up the runtime volume.
-3. Fetch the approved repository revision.
-4. Build the image with `docker compose --profile cli build cli`.
-5. Run the validation command.
+3. Read the migration notes for the target revision.
+4. Build the approved image.
+5. Run validation.
 6. Run a daily dry run.
 7. Start the scheduler.
-8. Examine the scheduler logs.
+8. Examine the logs.
 
 ## Rollback
 
@@ -86,31 +107,39 @@ Start the scheduler after the copy completes. Do an SQLite integrity test after 
 2. Restore the prior repository revision.
 3. Restore its matching runtime-volume backup.
 4. Build the prior image.
-5. Run the validation command.
+5. Run validation.
 6. Start the scheduler.
 
 Do not use a newer database with an older image unless that revision documents compatibility.
 
-## Source failures
+## Troubleshooting
 
-Each configured source receipt records listed, accepted, request, and failure counts. The report shows `partial` when some source items fail.
+### Validation fails
 
-If the source is partial, examine each failure in the report. Do not treat the omitted source jobs as closed.
+Read the error without copying private configuration to a shared channel. Make sure that all five YAML documents use schema version 1.
 
-If the source fails, the command exits with a nonzero status. Read the JSON file under `/data/errors`.
+Make sure that the configuration directory contains exactly four expected files. Production mode also rejects public fictional identities.
 
-Retry only after you identify a temporary network or source problem. Do not increase request limits to bypass an unexplained count mismatch.
+### Source failures
 
-## Storage checks
+Each source receipt records listed, accepted, request, and failure counts. A partial source does not close unseen jobs.
 
-Run SQLite integrity and foreign-key checks from a protected maintenance environment. Do not print private snapshot or report tables to shared logs.
+If one source fails, other enabled sources continue. If all sources fail, the daily command exits with a nonzero status.
 
-## Cleanup
+Examine `/data/errors` and the report source-health section. Do not increase limits until you understand the mismatch.
 
-Remove stopped CLI containers:
+### Discord delivery fails
 
-```text
-docker compose --profile cli rm --force --stop cli
-```
+Make sure that the destination is enabled for the report cadence. Examine the secret-file permissions and the Discord webhook state.
 
-Delete the runtime volume only when you have an approved backup. The delete action removes job history and reports.
+Do not print the webhook URL. Use `retry-delivery` after you correct a temporary problem.
+
+### Scheduler does not run
+
+Examine the normalized Compose configuration and scheduler logs. Make sure that the IANA timezone and cron forms are valid.
+
+A nonexistent spring DST time does not run. Select a stable local time when this behavior is not acceptable.
+
+### Writer lock is busy
+
+Wait for the active command to finish. Do not run daily, weekly, or retry commands in parallel against one runtime volume.

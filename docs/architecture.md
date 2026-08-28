@@ -1,44 +1,56 @@
 # Architecture
 
-## Runtime boundary
+## Runtime roles
 
-Docker Compose starts one immutable image. The `cli` profile runs one command and stops. The Compose init process is PID 1 for the `scheduler` profile.
+Docker Compose builds one immutable image. The `cli` profile runs one command and stops.
 
-The init process starts Supercronic and forwards termination signals.
+The Compose init process is PID 1 for the scheduler profile. It starts Supercronic and forwards termination signals.
 
 The image runs as an unprivileged user. Compose removes Linux capabilities and uses a read-only root file system.
 
-## Data flow
+## Configuration flow
 
-The configuration loader reads `resume_facts.yaml`, `strategy.yaml`, and
-`sources.yaml`. It validates each file before a run uses the values.
+The loader reads `resume_facts.yaml` and four configuration documents. It validates one stable snapshot before a command uses the values.
 
-The closed source registry builds each enabled configured Workday instance in
-document order. Each adapter accepts only links on its approved HTTPS origin.
+Production mode rejects the public fictional profile and strategy identities. Demo mode permits only an explicit fictional flow.
 
-The collection service stores each raw observation and each canonical job version in SQLite. A source receipt records counts, limits, and failures.
+The secret-safe validation summary reports paths, schema versions, source IDs, destination IDs, cadence settings, and enabled states.
 
-The ranking service creates a deterministic base score for every accepted job. The score includes title, skills, experience, location, and company categories.
+## Daily data flow
 
-The optional LLM service can add a bounded adjustment. The deterministic evidence and base score do not change.
+1. The closed registry builds enabled configured Workday sources in document order.
+2. Each adapter reads only its approved public HTTPS origin.
+3. The collection service stores observations and canonical job versions in SQLite.
+4. The ranking service scores every accepted job with the preserved score contract.
+5. The report service stores immutable Markdown bytes before delivery.
+6. Enabled destinations receive the stored report bytes.
 
-The report service stores immutable Markdown bytes in SQLite. It also writes the same bytes to the configured report path.
+One source failure does not remove successful results from other sources. A complete source run can mark its unseen old jobs as stale.
+
+## Weekly data flow
+
+The weekly role reads stored daily report history for the prior completed local week. It does not collect sources again.
+
+The report service stores one deterministic weekly report before delivery. Retry uses the stored report bytes.
 
 ## Trust boundaries
 
-The resume profile and strategy are private inputs. Compose mounts them as read-only paths.
+The resume profile, strategy, SQLite history, receipts, errors, reports, and secret files are private inputs or outputs.
 
-Each configured Workday service is an untrusted public source. The adapter
-applies request, page, response-size, redirect-origin, and URL limits.
+Configured Workday services are untrusted public sources. The adapter enforces request, page, response-size, URL, DNS, and exact redirect-origin limits.
 
-An LLM endpoint is optional and untrusted. The client accepts one strict JSON object and caps the adjustment from -5 through 5.
+Discord and the optional LLM endpoint are untrusted destinations. Their secrets enter only through mounted secret files.
 
-SQLite is the durable local record. One operating-system lock prevents two writers from changing history at the same time.
+SQLite is the durable local record. One operating-system lock prevents concurrent writers from changing one runtime volume.
+
+## Delivery recovery
+
+A delivery stores an indeterminate claim before network I/O. It stores acknowledgment evidence after Discord accepts a chunk.
+
+A retry uses report bytes and delivery evidence from SQLite. It does not build a changed report.
 
 ## Failure model
 
-A complete source run can mark missing old jobs as stale. A failed source run does not close jobs.
+A partial source run records accepted jobs and failures. It does not age unseen jobs.
 
-A partial source run records each accepted job and each source failure. The report shows the partial state.
-
-The runtime writes an error receipt after a validation, source, storage, or report failure. It exits with a nonzero status.
+A validation, source, storage, report, or delivery failure creates error evidence. The command exits with a nonzero status.

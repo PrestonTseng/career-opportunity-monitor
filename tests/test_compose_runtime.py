@@ -207,6 +207,7 @@ def compose_project(tmp_path: Path) -> Iterator[tuple[str, dict[str, str]]]:
     data_directory.mkdir()
     environment = dict(os.environ)
     environment["CAREER_MONITOR_DATA_PATH"] = str(data_directory)
+    environment["CAREER_MONITOR_MODE"] = "demo"
     try:
         yield project, environment
     finally:
@@ -293,6 +294,7 @@ def test_compose_config_preserves_the_runtime_boundary() -> None:
         environment = cast(dict[str, str], service["environment"])
         assert environment["CAREER_MONITOR_DISPLAY_LIMIT"] == "17"
         assert environment["CAREER_MONITOR_LOCK_TIMEOUT_SECONDS"] == "0.75"
+        assert environment["CAREER_MONITOR_MODE"] == "production"
         assert environment["CAREER_MONITOR_LLM_BASE_URL"] == "https://llm.invalid/v1"
         assert environment["CAREER_MONITOR_LLM_MODE"] == "remote"
         assert environment["CAREER_MONITOR_LLM_MODEL"] == "controlled-model"

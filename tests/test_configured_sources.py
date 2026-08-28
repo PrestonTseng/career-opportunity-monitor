@@ -191,6 +191,16 @@ class _MalformedRedirectConnection:
         return None
 
 
+class _CrossOriginRedirectResponse(_MalformedRedirectResponse):
+    def getheader(self, name: str) -> str | None:
+        return "https://evil.example/path" if name == "Location" else None
+
+
+class _CrossOriginRedirectConnection(_MalformedRedirectConnection):
+    def getresponse(self) -> _CrossOriginRedirectResponse:
+        return _CrossOriginRedirectResponse()
+
+
 class _BadStatusLineConnection(_Connection):
     def getresponse(self) -> _Response:
         raise BadStatusLine("ATTACKER-CONTROLLED-STATUS-LINE")
@@ -246,6 +256,34 @@ def test_transport_normalizes_a_malformed_redirect_location_to_source_error() ->
         pytest.raises(SourceError, match="invalid redirect"),
     ):
         transport.request("https://jobs.example.com/path", None)
+
+
+def test_transport_rejects_cross_origin_redirect_before_another_connection() -> None:
+    connected: list[str] = []
+
+    def connection_factory(
+        host: str, address: str, timeout: float
+    ) -> _CrossOriginRedirectConnection:
+        connected.append(host)
+        return _CrossOriginRedirectConnection()
+
+    transport = UrlLibTransport(
+        approved_origin="https://jobs.example.com",
+        timeout_seconds=10,
+        response_limit_bytes=100,
+        connection_factory=connection_factory,
+    )
+
+    with (
+        patch(
+            "career_opportunity_monitor.workday.socket.getaddrinfo",
+            return_value=_public_dns_answer(),
+        ),
+        pytest.raises(SourceError, match=r"^source returned an invalid redirect$"),
+    ):
+        transport.request("https://jobs.example.com/path", None)
+
+    assert connected == ["jobs.example.com"]
 
 
 @pytest.mark.parametrize(

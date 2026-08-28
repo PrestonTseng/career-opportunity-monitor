@@ -68,11 +68,11 @@ def test_load_configuration_compiles_versioned_sources_in_document_order() -> No
 
     assert [source.id for source in loaded.sources] == [
         "example-workday",
-        "nvidia-workday-example",
+        "second-example-workday",
     ]
     assert loaded.sources[0].adapter == "workday"
     assert loaded.sources[0].origin == "https://example.wd5.myworkdayjobs.com"
-    assert loaded.sources[1].enabled is False
+    assert loaded.sources[1].enabled is True
     assert len(loaded.sources_hash) == 64
     assert (STRATEGY_DIR / "sources.yaml").read_bytes() in loaded.sources_snapshot_bytes
 
