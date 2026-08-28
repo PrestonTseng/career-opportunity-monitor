@@ -27,13 +27,8 @@ services:
       - type: volume
         source: runtime-data
         target: /data
-      - type: volume
-        source: crontab-data
-        target: /etc/career-monitor
-        read_only: true
 
 volumes:
   profile-data:
   config-data:
   runtime-data:
-  crontab-data:

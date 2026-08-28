@@ -888,6 +888,18 @@ class SQLiteRepository:
             raise RepositoryError("report does not exist")
         return bytes(row[0])
 
+    def list_reports(
+        self, prefix: str, start: str, end: str
+    ) -> tuple[tuple[str, bytes], ...]:
+        if not prefix or not start or not end or start >= end:
+            raise RepositoryError("report range must be valid")
+        rows = self._connection.execute(
+            "SELECT report_key, report_bytes FROM reports "
+            "WHERE report_key >= ? AND report_key < ? ORDER BY report_key",
+            (f"{prefix}{start}", f"{prefix}{end}"),
+        )
+        return tuple((str(key), bytes(content)) for key, content in rows)
+
     def delivery_chunk_acknowledged(
         self,
         report_key: str,

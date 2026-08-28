@@ -383,26 +383,71 @@ def test_daily_live_run_collects_scores_and_writes_report(
     repository.close()
 
 
-def test_weekly_role_is_rejected_without_a_completed_receipt(
+def test_daily_report_id_uses_configured_local_calendar_date(tmp_path: Path) -> None:
+    environment = _runtime_environment(tmp_path)
+    environment["CAREER_MONITOR_RUN_ID"] = "daily-local-date"
+    environment["CAREER_MONITOR_NOW"] = "2026-08-30T16:00:00Z"
+
+    assert run(("daily",), environment=environment, source=FixtureSource()) == 0
+
+    data_directory = Path(environment["CAREER_MONITOR_DATA_DIR"])
+    report_path = data_directory / "reports" / "daily-2026-08-31.md"
+    assert report_path.is_file()
+    repository = SQLiteRepository(data_directory / "history.sqlite3")
+    assert repository.get_report("daily:2026-08-31") == report_path.read_bytes()
+    repository.close()
+
+
+def test_weekly_role_aggregates_history_without_collecting(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     environment = _runtime_environment(tmp_path)
     environment["CAREER_MONITOR_RUN_ID"] = "weekly-fixture"
-    environment["CAREER_MONITOR_NOW"] = "2026-08-27T03:35:00Z"
+    environment["CAREER_MONITOR_NOW"] = "2026-08-31T01:00:00Z"
     data_directory = Path(environment["CAREER_MONITOR_DATA_DIR"])
+    repository = SQLiteRepository(data_directory / "history.sqlite3")
+    repository.store_report("daily:2026-08-24", b"# Fictional Monday\n", "one")
+    repository.store_report("daily:2026-08-25", b"# Fictional Tuesday\n", "two")
+    repository.close()
 
-    exit_code = run(("weekly",), environment=environment)
+    exit_code = run(("weekly",), environment=environment, source=FailedSource())
 
-    assert exit_code == 2
-    assert not (data_directory / "receipts" / "weekly-weekly-fixture.json").exists()
-    error_path = data_directory / "errors" / "weekly-weekly-fixture.json"
-    error = json.loads(error_path.read_text(encoding="utf-8"))
-    assert error["command"] == "weekly"
-    assert error["failed_at"] == "2026-08-27T03:35:00Z"
-    assert error["run_id"] == "weekly-fixture"
-    assert error["status"] == "failed"
-    assert "weekly maintenance is not implemented" in error["error"]
-    assert "weekly maintenance is not implemented" in capsys.readouterr().err
+    assert exit_code == 0
+    report_path = data_directory / "reports" / "weekly-2026-08-24.md"
+    report = report_path.read_text(encoding="utf-8")
+    assert report.index("Fictional Monday") < report.index("Fictional Tuesday")
+    receipt = json.loads(
+        (data_directory / "receipts" / "weekly-weekly-fixture.json").read_text()
+    )
+    assert receipt["week_start"] == "2026-08-24"
+    assert receipt["week_end"] == "2026-08-31"
+    assert json.loads(capsys.readouterr().out)["report"] == str(report_path)
+
+
+def test_weekly_role_selects_previous_local_week_across_spring_dst(
+    tmp_path: Path,
+) -> None:
+    environment = _runtime_environment(tmp_path)
+    environment["CAREER_MONITOR_RUN_ID"] = "weekly-spring-dst"
+    environment["CAREER_MONITOR_NOW"] = "2026-03-09T04:00:00Z"
+    schedule_path = Path(environment["CAREER_MONITOR_CONFIG_DIR"]) / "schedule.yaml"
+    schedule_path.write_text(
+        schedule_path.read_text(encoding="utf-8").replace(
+            "timezone: Asia/Taipei", "timezone: America/New_York"
+        ),
+        encoding="utf-8",
+    )
+    data_directory = Path(environment["CAREER_MONITOR_DATA_DIR"])
+    repository = SQLiteRepository(data_directory / "history.sqlite3")
+    repository.store_report("daily:2026-02-23", b"wrong week\n", "one")
+    repository.store_report("daily:2026-03-02", b"expected week\n", "two")
+    repository.close()
+
+    assert run(("weekly",), environment=environment) == 0
+
+    report_path = data_directory / "reports" / "weekly-2026-03-02.md"
+    assert report_path.is_file()
+    assert b"expected week" in report_path.read_bytes()
 
 
 def test_partial_daily_run_does_not_age_unseen_jobs(tmp_path: Path) -> None:

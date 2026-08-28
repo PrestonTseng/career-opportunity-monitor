@@ -13,6 +13,7 @@ from importlib.resources import files
 from pathlib import Path
 from typing import cast
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 from jsonschema import Draft202012Validator
@@ -20,6 +21,7 @@ from jsonschema.exceptions import ValidationError
 
 from .models import (
     CATEGORIES,
+    CadenceSchedule,
     Category,
     CompiledProfile,
     DestinationConfiguration,
@@ -29,6 +31,7 @@ from .models import (
     Market,
     ReportCadence,
     ResumeFact,
+    ScheduleConfiguration,
     SourceAdapter,
     SourceConfiguration,
     Strategy,
@@ -366,6 +369,42 @@ def _compile_destinations(value: object) -> tuple[DestinationConfiguration, ...]
     return destinations
 
 
+def _compile_schedule(value: object) -> ScheduleConfiguration:
+    root = cast(dict[str, object], value)
+    timezone_name = cast(str, root["timezone"])
+    try:
+        ZoneInfo(timezone_name)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ConfigError("schedule timezone must be a valid IANA timezone") from exc
+
+    daily_raw = cast(dict[str, object], root["daily"])
+    weekly_raw = cast(dict[str, object], root["weekly"])
+    daily = CadenceSchedule(
+        enabled=cast(bool, daily_raw["enabled"]),
+        cron=cast(str, daily_raw["cron"]),
+    )
+    weekly = CadenceSchedule(
+        enabled=cast(bool, weekly_raw["enabled"]),
+        cron=cast(str, weekly_raw["cron"]),
+    )
+    daily_match = re.fullmatch(r"(\d|[1-5]\d) ([01]?\d|2[0-3]) \* \* \*", daily.cron)
+    weekly_match = re.fullmatch(
+        r"(\d|[1-5]\d) ([01]?\d|2[0-3]) \* \* ([0-6])", weekly.cron
+    )
+    if daily_match is None:
+        raise ConfigError("daily cron must use 'minute hour * * *'")
+    if weekly_match is None:
+        raise ConfigError("weekly cron must use 'minute hour * * weekday'")
+    if (
+        daily.enabled
+        and weekly.enabled
+        and tuple(map(int, daily_match.groups()[:2]))
+        == tuple(map(int, weekly_match.groups()[:2]))
+    ):
+        raise ConfigError("daily and weekly schedules overlap")
+    return ScheduleConfiguration(timezone=timezone_name, daily=daily, weekly=weekly)
+
+
 def _assert_unchanged(path: Path, expected: _Fingerprint) -> None:
     try:
         current = _fingerprint(path.lstat())
@@ -390,10 +429,15 @@ def load_configuration(
         raise ConfigError("unsafe strategy directory shape")
 
     entries_before = tuple(sorted(path.name for path in strategy_directory.iterdir()))
-    if entries_before != ("destinations.yaml", "sources.yaml", "strategy.yaml"):
+    if entries_before != (
+        "destinations.yaml",
+        "schedule.yaml",
+        "sources.yaml",
+        "strategy.yaml",
+    ):
         raise ConfigError(
             "configuration directory must contain exactly destinations.yaml, "
-            "sources.yaml, and strategy.yaml"
+            "schedule.yaml, sources.yaml, and strategy.yaml"
         )
 
     resume_raw, resume_fingerprint = _read_stable_regular(resume_path)
@@ -403,6 +447,8 @@ def load_configuration(
     sources_raw, sources_fingerprint = _read_stable_regular(sources_path)
     destinations_path = strategy_directory / "destinations.yaml"
     destinations_raw, destinations_fingerprint = _read_stable_regular(destinations_path)
+    schedule_path = strategy_directory / "schedule.yaml"
+    schedule_raw, schedule_fingerprint = _read_stable_regular(schedule_path)
     if after_read is not None:
         after_read()
 
@@ -410,6 +456,7 @@ def load_configuration(
     _assert_unchanged(strategy_path, strategy_fingerprint)
     _assert_unchanged(sources_path, sources_fingerprint)
     _assert_unchanged(destinations_path, destinations_fingerprint)
+    _assert_unchanged(schedule_path, schedule_fingerprint)
     if _fingerprint(strategy_directory.lstat()) != _fingerprint(directory_before):
         raise ConfigError("strategy directory changed while reading")
     entries_after = tuple(sorted(path.name for path in strategy_directory.iterdir()))
@@ -420,26 +467,32 @@ def load_configuration(
     strategy_value = _load_yaml(strategy_raw, str(strategy_path))
     sources_value = _load_yaml(sources_raw, str(sources_path))
     destinations_value = _load_yaml(destinations_raw, str(destinations_path))
+    schedule_value = _load_yaml(schedule_raw, str(schedule_path))
     _validate(resume_value, "resume-facts.schema.yaml", "resume profile")
     _validate(strategy_value, "strategy.schema.yaml", "strategy")
     _validate(sources_value, "sources.schema.yaml", "sources")
     _validate(destinations_value, "destinations.schema.yaml", "destinations")
+    _validate(schedule_value, "schedule.schema.yaml", "schedule")
 
     profile_snapshot = _snapshot_bytes(((resume_path.name, resume_raw),))
     strategy_snapshot = _snapshot_bytes((("strategy.yaml", strategy_raw),))
     sources_snapshot = _snapshot_bytes((("sources.yaml", sources_raw),))
     destinations_snapshot = _snapshot_bytes((("destinations.yaml", destinations_raw),))
+    schedule_snapshot = _snapshot_bytes((("schedule.yaml", schedule_raw),))
     return LoadedConfiguration(
         profile=_compile_profile(resume_value),
         strategy=_compile_strategy(strategy_value),
         sources=_compile_sources(sources_value),
         destinations=_compile_destinations(destinations_value),
+        schedule=_compile_schedule(schedule_value),
         profile_hash=hashlib.sha256(profile_snapshot).hexdigest(),
         strategy_hash=hashlib.sha256(strategy_snapshot).hexdigest(),
         sources_hash=hashlib.sha256(sources_snapshot).hexdigest(),
         destinations_hash=hashlib.sha256(destinations_snapshot).hexdigest(),
+        schedule_hash=hashlib.sha256(schedule_snapshot).hexdigest(),
         profile_snapshot_bytes=profile_snapshot,
         strategy_snapshot_bytes=strategy_snapshot,
         sources_snapshot_bytes=sources_snapshot,
         destinations_snapshot_bytes=destinations_snapshot,
+        schedule_snapshot_bytes=schedule_snapshot,
     )

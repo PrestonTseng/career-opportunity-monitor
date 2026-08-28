@@ -27,6 +27,7 @@ def _configuration(tmp_path: Path, destinations: object) -> Path:
     (directory / "destinations.yaml").write_text(
         yaml.safe_dump(destinations), encoding="utf-8"
     )
+    shutil.copyfile(STRATEGY / "schedule.yaml", directory / "schedule.yaml")
     return directory
 
 

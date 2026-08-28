@@ -2,7 +2,7 @@
 
 The monitor reads one resume-facts file and one configuration directory. The
 configuration directory must contain exactly `strategy.yaml`, `sources.yaml`,
-and `destinations.yaml`.
+`destinations.yaml`, and `schedule.yaml`.
 
 Use the files in `examples/` as fictional templates. Do not put private values in public examples.
 
@@ -59,6 +59,23 @@ Create the webhook file outside Git as one private line. Set
 `CAREER_MONITOR_DISCORD_SECRET_FILE` to that host path. Compose mounts it at
 `/run/secrets/discord-webhook`. It is not passed in an environment value or CLI
 argument. Only approved Discord HTTPS webhook hosts are accepted.
+
+## Schedule
+
+`schedule.yaml` contains one IANA timezone and explicit enabled switches and
+cron expressions for daily and weekly runs. The supported forms are
+`minute hour * * *` for daily and `minute hour * * weekday` for weekly. The
+runtime rejects aliases, ranges, steps, malformed values, and daily and weekly
+runs at the same wall-clock minute.
+
+Compose remains the only scheduler owner. At startup it validates this file and
+generates the Supercronic input. Supercronic interprets both cadences in the
+configured local wall time. Across DST changes, a missing spring-forward wall
+time does not run and a repeated fall-back wall time follows Supercronic's cron
+behavior. Weekly report IDs and Monday-to-Monday data boundaries are still
+derived from local calendar dates and do not depend on UTC offset length.
+Daily report IDs also use the configured local calendar date, not the UTC date
+at which the scheduled process happens to start.
 
 ## Compose paths
 

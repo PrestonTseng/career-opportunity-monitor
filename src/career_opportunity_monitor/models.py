@@ -103,19 +103,35 @@ class DestinationConfiguration:
 
 
 @dataclass(frozen=True)
+class CadenceSchedule:
+    enabled: bool
+    cron: str
+
+
+@dataclass(frozen=True)
+class ScheduleConfiguration:
+    timezone: str
+    daily: CadenceSchedule
+    weekly: CadenceSchedule
+
+
+@dataclass(frozen=True)
 class LoadedConfiguration:
     profile: CompiledProfile
     strategy: Strategy
     sources: tuple[SourceConfiguration, ...]
     destinations: tuple[DestinationConfiguration, ...]
+    schedule: ScheduleConfiguration
     profile_hash: str
     strategy_hash: str
     sources_hash: str
     destinations_hash: str
+    schedule_hash: str
     profile_snapshot_bytes: bytes
     strategy_snapshot_bytes: bytes
     sources_snapshot_bytes: bytes
     destinations_snapshot_bytes: bytes
+    schedule_snapshot_bytes: bytes
 
 
 WorkMode = Literal["office", "hybrid", "remote", "unknown"]

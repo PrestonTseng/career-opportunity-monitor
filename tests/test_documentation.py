@@ -40,10 +40,16 @@ def test_public_documentation_covers_the_operator_contract() -> None:
             assert value in text, f"{relative_path} does not contain {value!r}"
 
 
-def test_public_documentation_does_not_advertise_unimplemented_weekly_work() -> None:
-    for relative_path in ("README.md", "docs/operations.md", "deploy/crontab"):
-        text = (ROOT / relative_path).read_text(encoding="utf-8").lower()
-        assert "weekly" not in text, f"{relative_path} advertises weekly work"
+def test_public_documentation_covers_weekly_and_schedule_configuration() -> None:
+    operations = (ROOT / "docs" / "operations.md").read_text(encoding="utf-8")
+    configuration = (ROOT / "docs" / "configuration.md").read_text(encoding="utf-8")
+
+    assert "weekly" in operations
+    assert "retry-delivery --cadence weekly" in operations
+    assert "schedule.yaml" in configuration
+    assert "IANA" in configuration
+    assert "local wall time" in configuration
+    assert "DST" in configuration
 
 
 def test_architecture_identifies_compose_init_as_pid_one() -> None:

@@ -50,10 +50,7 @@ services:
     init: true
     restart: unless-stopped
     entrypoint:
-      - /usr/local/bin/supercronic
-    command:
-      - -passthrough-logs
-      - /etc/career-monitor/crontab
+      - /usr/local/bin/career-monitor-scheduler
     volumes:
       - type: bind
         source: ${CAREER_MONITOR_RESUME_FILE:-./examples/resume_facts.yaml}
@@ -66,10 +63,7 @@ services:
       - type: volume
         source: runtime-data
         target: /data
-      - type: bind
-        source: ${CAREER_MONITOR_CRONTAB_FILE:-./deploy/crontab}
-        target: /etc/career-monitor/crontab
-        read_only: true
+
 
   cli:
     <<: *runtime

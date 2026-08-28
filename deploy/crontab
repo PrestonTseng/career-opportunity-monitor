@@ -1,2 +1,0 @@
-# Daily run at 00:00 UTC.
-0 0 * * * career-monitor daily

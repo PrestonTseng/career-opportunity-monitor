@@ -28,10 +28,24 @@ Run a daily collection and report:
 docker compose --profile cli run --rm cli daily
 ```
 
+Run a weekly report from already stored daily report history. This command does
+not recollect jobs. A scheduled Monday run summarizes the prior completed local
+calendar week:
+
+```text
+docker compose --profile cli run --rm cli weekly
+```
+
 If a report delivery fails, retry the stored report bytes:
 
 ```text
 docker compose --profile cli run --rm cli retry-delivery --report-date 2026-08-27
+```
+
+Retry the immutable weekly report whose ID is its local Monday start date:
+
+```text
+docker compose --profile cli run --rm cli retry-delivery --cadence weekly --report-date 2026-08-24
 ```
 
 Discord delivery is chunked at the destination limit. Acknowledged chunk hashes

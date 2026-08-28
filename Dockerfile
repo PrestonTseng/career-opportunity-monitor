@@ -7,6 +7,9 @@ ARG SUPERCRONIC_VERSION=v0.2.49
 COPY --from=uv /uv /uvx /bin/
 
 RUN set -eux; \
+    apt-get update; \
+    apt-get install --no-install-recommends --yes tzdata; \
+    rm -rf /var/lib/apt/lists/*; \
     detected_arch="$(dpkg --print-architecture)"; \
     case "$detected_arch" in \
       amd64) supercronic_arch=amd64; supercronic_sha=a53ae236602c7338aba3fbaff40bda6300eae3b9fedb8261eb06cfe3724430c1 ;; \
@@ -32,6 +35,8 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 COPY schemas ./schemas
 COPY src ./src
+COPY deploy/scheduler-entrypoint.sh /usr/local/bin/career-monitor-scheduler
+RUN chmod 0755 /usr/local/bin/career-monitor-scheduler
 RUN uv sync --frozen --no-dev && uv cache clean
 
 USER 10001:10001

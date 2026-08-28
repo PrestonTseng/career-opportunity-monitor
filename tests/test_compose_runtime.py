@@ -72,8 +72,6 @@ def _seed_test_volumes(
             f"{project}_profile-data:/profile",
             "--volume",
             f"{project}_config-data:/config",
-            "--volume",
-            f"{project}_crontab-data:/etc/career-monitor",
             image_id,
         ),
         check=True,
@@ -95,7 +93,10 @@ def _seed_test_volumes(
                 ROOT / "examples" / "strategy" / "v1" / "destinations.yaml",
                 "/config/destinations.yaml",
             ),
-            (ROOT / "deploy" / "crontab", "/etc/career-monitor/crontab"),
+            (
+                ROOT / "examples" / "strategy" / "v1" / "schedule.yaml",
+                "/config/schedule.yaml",
+            ),
         ):
             subprocess.run(
                 ("docker", "cp", str(source), f"{seed_container}:{destination}"),
@@ -172,6 +173,30 @@ def _wait_for_state(
     raise AssertionError(
         f"container {container_id} did not reach {expected}: "
         f"{_container_state(container_id)}"
+    )
+
+
+def _wait_for_container_log(
+    container_id: str, expected: str, *, timeout_seconds: float = 45
+) -> str:
+    deadline = time.monotonic() + timeout_seconds
+    logs = ""
+    while time.monotonic() < deadline:
+        completed = subprocess.run(
+            ("docker", "logs", container_id),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        logs = completed.stdout + completed.stderr
+        if expected in logs:
+            return logs
+        if _container_state(container_id)["Status"] == "exited":
+            break
+        time.sleep(0.2)
+    raise AssertionError(
+        f"container {container_id} did not log {expected!r}: "
+        f"state={_container_state(container_id)!r}, logs={logs!r}"
     )
 
 
@@ -341,13 +366,11 @@ def test_fresh_image_runs_all_cli_roles_as_non_root(
         "weekly",
         "--dry-run",
         environment=environment,
-        check=False,
     )
-    assert weekly.returncode == 2
-    assert "weekly maintenance is not implemented" in weekly.stderr
+    assert json.loads(weekly.stdout)["status"] == "completed"
 
 
-def test_daily_commands_share_one_durable_lock(
+def test_reporting_commands_share_one_durable_lock(
     compose_project: tuple[str, dict[str, str]],
 ) -> None:
     project, environment = compose_project
@@ -360,7 +383,7 @@ from career_opportunity_monitor.sqlite_repository import SQLiteRepository
 repository = SQLiteRepository(Path('/data/history.sqlite3'))
 with repository.writer_lock('daily'):
     print('lock-ready', flush=True)
-    time.sleep(5)
+    time.sleep(10)
 repository.close()
 """
     holder = subprocess.Popen(
@@ -390,35 +413,49 @@ repository.close()
     assert holder.stdout is not None
     assert holder.stdout.readline().strip() == "lock-ready"
 
+    collisions: list[tuple[tuple[str, ...], subprocess.CompletedProcess[str]]] = []
     try:
-        collision = _test_compose_command(
-            project,
-            "--profile",
-            "cli",
-            "run",
-            "--rm",
-            "--no-deps",
-            "-e",
-            "CAREER_MONITOR_RUN_ID=compose-lock",
-            "-e",
-            "CAREER_MONITOR_LOCK_TIMEOUT_SECONDS=0.01",
-            "cli",
-            "daily",
-            "--dry-run",
-            environment=environment,
-            check=False,
-        )
+        for command in (
+            ("daily", "--dry-run"),
+            ("weekly", "--dry-run"),
+            ("retry-delivery", "--report-date", "2026-08-27"),
+        ):
+            collisions.append(
+                (
+                    command,
+                    _test_compose_command(
+                        project,
+                        "--profile",
+                        "cli",
+                        "run",
+                        "--rm",
+                        "--no-deps",
+                        "-e",
+                        "CAREER_MONITOR_RUN_ID=compose-lock",
+                        "-e",
+                        "CAREER_MONITOR_LOCK_TIMEOUT_SECONDS=0.01",
+                        "cli",
+                        *command,
+                        environment=environment,
+                        check=False,
+                    ),
+                )
+            )
     finally:
-        holder.communicate(timeout=10)
+        holder.communicate(timeout=15)
 
-    assert collision.returncode == 1
-    assert "writer lock was not available" in collision.stderr
-    error = json.loads(
-        _read_runtime_file(project, environment, "/data/errors/daily-compose-lock.json")
-    )
-    assert error["command"] == "daily"
-    assert error["status"] == "failed"
-    assert "writer lock was not available" in error["error"]
+    for command, collision in collisions:
+        assert collision.returncode == 1
+        assert "writer lock was not available" in collision.stderr
+        command_name = command[0]
+        error = json.loads(
+            _read_runtime_file(
+                project, environment, f"/data/errors/{command_name}-compose-lock.json"
+            )
+        )
+        assert error["command"] == command_name
+        assert error["status"] == "failed"
+        assert "writer lock was not available" in error["error"]
 
 
 def test_invalid_profile_mount_exits_nonzero_and_keeps_error_evidence(
@@ -499,6 +536,7 @@ def test_scheduler_stops_gracefully(
     ).stdout.strip()
     assert container_id
     _wait_for_state(container_id, "running")
+    _wait_for_container_log(container_id, "read crontab:")
 
     _test_compose_command(
         project,
@@ -513,6 +551,9 @@ def test_scheduler_stops_gracefully(
 
     state = _wait_for_state(container_id, "exited")
     assert state["ExitCode"] == 0
+    logs = _wait_for_container_log(container_id, "exiting")
+    assert "received terminated" in logs
+    assert "waiting for jobs" in logs
 
 
 def test_scheduler_restarts_after_an_unexpected_exit(

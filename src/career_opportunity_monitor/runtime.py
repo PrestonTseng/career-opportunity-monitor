@@ -7,9 +7,10 @@ import os
 import sys
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
+from zoneinfo import ZoneInfo
 
 from .collection import CollectionResult, CollectionService
 from .config import ConfigError, load_configuration
@@ -24,8 +25,11 @@ from .reporting import (
     FileDelivery,
     ReportJob,
     SourceHealth,
+    WeeklyReportService,
+    weekly_window,
 )
 from .repository import RepositoryError
+from .schedule import render_supercronic_schedule
 from .source import JobSource, SourceError
 from .source_registry import build_sources
 from .sqlite_repository import SQLiteRepository
@@ -45,10 +49,12 @@ def run(
     """Run one profile-gated container role."""
     parser = argparse.ArgumentParser(prog="career-monitor")
     parser.add_argument(
-        "command", choices=("validate", "daily", "retry-delivery", "weekly")
+        "command",
+        choices=("validate", "daily", "retry-delivery", "render-schedule", "weekly"),
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--report-date")
+    parser.add_argument("--cadence", choices=("daily", "weekly"), default="daily")
     arguments = parser.parse_args(argv)
     values = os.environ if environment is None else environment
     data_directory = Path(values.get("CAREER_MONITOR_DATA_DIR", _DEFAULT_DATA_DIR))
@@ -97,20 +103,9 @@ def run(
         )
         return 0
 
-    if arguments.command == "weekly":
-        error = "weekly maintenance is not implemented"
-        _write_json(
-            data_directory / "errors" / f"weekly-{run_id}.json",
-            {
-                "command": "weekly",
-                "error": error,
-                "failed_at": finished_at,
-                "run_id": run_id,
-                "status": "failed",
-            },
-        )
-        print(error, file=sys.stderr)
-        return 2
+    if arguments.command == "render-schedule":
+        sys.stdout.write(render_supercronic_schedule(configuration.schedule))
+        return 0
 
     receipt_path = data_directory / "receipts" / f"{arguments.command}-{run_id}.json"
     error_path = data_directory / "errors" / f"{arguments.command}-{run_id}.json"
@@ -129,6 +124,9 @@ def run(
                 "status": "completed",
             }
             if arguments.command == "daily" and not arguments.dry_run:
+                report_date = _local_report_date(
+                    finished_at, ZoneInfo(configuration.schedule.timezone)
+                )
                 configured_sources = (
                     tuple(sources)
                     if sources is not None
@@ -145,17 +143,50 @@ def run(
                         environment=values,
                         run_id=run_id,
                         finished_at=finished_at,
+                        report_date=report_date,
                     )
+                )
+            elif arguments.command == "weekly" and not arguments.dry_run:
+                week_start, week_end = _previous_week_window(
+                    finished_at, ZoneInfo(configuration.schedule.timezone)
+                )
+                report_path = data_directory / "reports" / f"weekly-{week_start}.md"
+                WeeklyReportService(repository).create_and_deliver(
+                    week_start=week_start,
+                    week_end=week_end,
+                    timezone=configuration.schedule.timezone,
+                    created_at=finished_at,
+                    deliveries=build_deliveries(
+                        configuration,
+                        cadence="weekly",
+                        report_key=f"weekly:{week_start}",
+                        report_path=report_path,
+                        repository=repository,
+                        now=lambda: finished_at,
+                    ),
+                )
+                receipt.update(
+                    {
+                        "report": str(report_path),
+                        "week_end": week_end,
+                        "week_start": week_start,
+                    }
                 )
             elif arguments.command == "retry-delivery" and not arguments.dry_run:
                 report_date = _required_report_date(arguments.report_date)
-                report_path = data_directory / "reports" / f"daily-{report_date}.md"
-                DailyReportService(repository).retry_delivery(
-                    f"daily:{report_date}",
+                cadence = arguments.cadence
+                report_path = data_directory / "reports" / f"{cadence}-{report_date}.md"
+                service = (
+                    WeeklyReportService(repository)
+                    if cadence == "weekly"
+                    else DailyReportService(repository)
+                )
+                service.retry_delivery(
+                    f"{cadence}:{report_date}",
                     build_deliveries(
                         configuration,
-                        cadence="daily",
-                        report_key=f"daily:{report_date}",
+                        cadence=cadence,
+                        report_key=f"{cadence}:{report_date}",
                         report_path=report_path,
                         repository=repository,
                         now=lambda: finished_at,
@@ -185,13 +216,21 @@ def run(
         "status": "completed",
     }
     if arguments.command == "daily" and not arguments.dry_run:
-        output["report"] = str(
-            data_directory / "reports" / f"daily-{finished_at[:10]}.md"
+        report_date = _local_report_date(
+            finished_at, ZoneInfo(configuration.schedule.timezone)
         )
+        output["report"] = str(data_directory / "reports" / f"daily-{report_date}.md")
     elif arguments.command == "retry-delivery":
         output["report"] = str(
-            data_directory / "reports" / f"daily-{arguments.report_date}.md"
+            data_directory
+            / "reports"
+            / f"{arguments.cadence}-{arguments.report_date}.md"
         )
+    elif arguments.command == "weekly" and not arguments.dry_run:
+        week_start, _ = _previous_week_window(
+            finished_at, ZoneInfo(configuration.schedule.timezone)
+        )
+        output["report"] = str(data_directory / "reports" / f"weekly-{week_start}.md")
     print(_json_text(output))
     return 0
 
@@ -205,6 +244,7 @@ def _run_daily(
     environment: Mapping[str, str],
     run_id: str,
     finished_at: str,
+    report_date: str,
 ) -> dict[str, object]:
     loaded = configuration
     repository.store_profile_snapshot(
@@ -305,9 +345,9 @@ def _run_daily(
                         assessment=assessment,
                     )
                 )
-    report_path = data_directory / "reports" / f"daily-{finished_at[:10]}.md"
+    report_path = data_directory / "reports" / f"daily-{report_date}.md"
     DailyReportService(repository).create_and_deliver(
-        report_date=finished_at[:10],
+        report_date=report_date,
         jobs=tuple(report_jobs),
         source_health=tuple(source_health),
         display_limit=int(environment.get("CAREER_MONITOR_DISPLAY_LIMIT", "25")),
@@ -315,7 +355,7 @@ def _run_daily(
         deliveries=build_deliveries(
             loaded,
             cadence="daily",
-            report_key=f"daily:{finished_at[:10]}",
+            report_key=f"daily:{report_date}",
             report_path=report_path,
             repository=repository,
             now=lambda: finished_at,
@@ -375,6 +415,25 @@ def _required_report_date(value: str | None) -> str:
     if parsed.isoformat() != value:
         raise ValueError("report date must use YYYY-MM-DD")
     return value
+
+
+def _parse_instant(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("runtime time must use an ISO 8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("runtime time must include a timezone")
+    return parsed
+
+
+def _local_report_date(value: str, timezone: ZoneInfo) -> str:
+    return _parse_instant(value).astimezone(timezone).date().isoformat()
+
+
+def _previous_week_window(value: str, timezone: ZoneInfo) -> tuple[str, str]:
+    local_instant = _parse_instant(value).astimezone(timezone)
+    return weekly_window(local_instant - timedelta(days=7), timezone)
 
 
 def _write_json(path: Path, value: object) -> None:
