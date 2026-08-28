@@ -10,6 +10,7 @@ FactKind = Literal[
     "certification", "education", "employment", "language", "project", "skill"
 ]
 FactStatus = Literal["confirmed", "planned"]
+SourceAdapter = Literal["workday"]
 
 CATEGORIES: tuple[Category, ...] = (
     "title",
@@ -67,13 +68,40 @@ class Strategy:
 
 
 @dataclass(frozen=True)
+class WorkdayOptions:
+    page_size: int
+    max_pages: int
+    max_requests: int
+    timeout_seconds: float
+    response_limit_bytes: int
+    retries: int
+    rate_limit_seconds: float
+
+
+@dataclass(frozen=True)
+class SourceConfiguration:
+    id: str
+    enabled: bool
+    adapter: SourceAdapter
+    origin: str
+    tenant: str
+    site: str
+    company: str
+    search_text: str
+    options: WorkdayOptions
+
+
+@dataclass(frozen=True)
 class LoadedConfiguration:
     profile: CompiledProfile
     strategy: Strategy
+    sources: tuple[SourceConfiguration, ...]
     profile_hash: str
     strategy_hash: str
+    sources_hash: str
     profile_snapshot_bytes: bytes
     strategy_snapshot_bytes: bytes
+    sources_snapshot_bytes: bytes
 
 
 WorkMode = Literal["office", "hybrid", "remote", "unknown"]

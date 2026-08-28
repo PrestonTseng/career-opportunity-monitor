@@ -11,11 +11,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-from .collection import CollectionService
+from .collection import CollectionResult, CollectionService
 from .config import ConfigError, load_configuration
 from .llm_adjustment import LlmConfiguration, assess_job, store_assessment
 from .models import LoadedConfiguration
-from .nvidia_workday import NvidiaWorkdaySource, SourceError
 from .ranking import evaluate_job
 from .reporting import (
     DailyReportService,
@@ -25,7 +24,8 @@ from .reporting import (
     SourceHealth,
 )
 from .repository import RepositoryError
-from .source import JobSource
+from .source import JobSource, SourceError
+from .source_registry import build_sources
 from .sqlite_repository import SQLiteRepository
 
 _DEFAULT_RESUME_PATH = "/profile/resume_facts.yaml"
@@ -38,6 +38,7 @@ def run(
     *,
     environment: Mapping[str, str] | None = None,
     source: JobSource | None = None,
+    sources: Sequence[JobSource] | None = None,
 ) -> int:
     """Run one profile-gated container role."""
     parser = argparse.ArgumentParser(prog="career-monitor")
@@ -51,6 +52,8 @@ def run(
     data_directory = Path(values.get("CAREER_MONITOR_DATA_DIR", _DEFAULT_DATA_DIR))
     run_id = values.get("CAREER_MONITOR_RUN_ID", uuid.uuid4().hex)
     finished_at = values.get("CAREER_MONITOR_NOW", _now())
+    if source is not None and sources is not None:
+        raise ValueError("source and sources overrides are mutually exclusive")
 
     try:
         _validate_data_directory(data_directory)
@@ -74,6 +77,10 @@ def run(
             _json_text(
                 {
                     "command": arguments.command,
+                    "configured_sources": len(configuration.sources),
+                    "enabled_source_ids": [
+                        source.id for source in configuration.sources if source.enabled
+                    ],
                     "profile_id": configuration.profile.profile_id,
                     "status": "ok",
                     "strategy_id": configuration.strategy.strategy_id,
@@ -114,11 +121,18 @@ def run(
                 "status": "completed",
             }
             if arguments.command == "daily" and not arguments.dry_run:
+                configured_sources = (
+                    tuple(sources)
+                    if sources is not None
+                    else (source,)
+                    if source is not None
+                    else build_sources(configuration.sources)
+                )
                 receipt.update(
                     _run_daily(
                         repository,
                         configuration=configuration,
-                        source=source or NvidiaWorkdaySource(),
+                        sources=configured_sources,
                         data_directory=data_directory,
                         environment=values,
                         run_id=run_id,
@@ -169,7 +183,7 @@ def _run_daily(
     repository: SQLiteRepository,
     *,
     configuration: LoadedConfiguration,
-    source: JobSource,
+    sources: Sequence[JobSource],
     data_directory: Path,
     environment: Mapping[str, str],
     run_id: str,
@@ -184,73 +198,112 @@ def _run_daily(
         loaded.strategy_snapshot_bytes,
         finished_at,
     )
-    collection = CollectionService(repository).collect(
-        source, run_id=f"{run_id}:source", now=finished_at
+    repository.store_sources_snapshot(
+        loaded.sources_hash,
+        loaded.sources_snapshot_bytes,
+        finished_at,
     )
-    observations = {
-        (item.job.source_name, item.job.source_job_id): item
-        for item in collection.observations
-    }
-    report_jobs: list[ReportJob] = []
-    llm_configuration = LlmConfiguration.from_environment(environment)
-    for result in collection.observation_results:
-        observation = observations[(result.source_name, result.source_job_id)]
-        evaluation = evaluate_job(loaded, observation.job)
-        evaluation_id = repository.store_evaluation(
-            result.job_version_id,
-            loaded.profile_hash,
-            loaded.strategy_hash,
-            evaluation.to_json_bytes(),
-            finished_at,
-        )
-        assessment = assess_job(
-            llm_configuration, loaded.strategy, observation.job, evaluation
-        )
-        store_assessment(repository, evaluation_id, assessment, finished_at)
-        if result.outcome in ("new", "changed"):
-            report_jobs.append(
-                ReportJob(
-                    job=observation.job,
-                    outcome=result.outcome,
-                    observed_at=observation.observed_at,
-                    evaluation=evaluation,
-                    assessment=assessment,
+    if not sources:
+        raise SourceError("no enabled sources configured")
+    collections: list[CollectionResult] = []
+    source_health: list[SourceHealth] = []
+    source_failures = 0
+    failed_messages: list[str] = []
+    service = CollectionService(repository)
+    for configured_source in sources:
+        try:
+            collection = service.collect(
+                configured_source,
+                run_id=f"{run_id}:source:{configured_source.name}",
+                now=finished_at,
+            )
+        except SourceError as exc:
+            source_failures += 1
+            failed_messages.append(f"{configured_source.name}: {exc}")
+            source_health.append(
+                SourceHealth(
+                    source_name=configured_source.name,
+                    status="failed",
+                    partial=False,
+                    failures=(str(exc),),
                 )
             )
-    raw_failures = collection.receipt.get("failures", [])
-    if not isinstance(raw_failures, list):
-        raise ValueError("source receipt failures must be a list of text values")
-    raw_failure_items = cast(list[object], raw_failures)
-    failures = tuple(
-        failure for failure in raw_failure_items if isinstance(failure, str)
-    )
-    if len(failures) != len(raw_failure_items):
-        raise ValueError("source receipt failures must be a list of text values")
-    partial = collection.receipt.get("partial", False)
-    if not isinstance(partial, bool):
-        raise ValueError("source receipt partial value must be a boolean")
+            continue
+        collections.append(collection)
+        raw_failures_value = collection.receipt.get("failures", [])
+        if not isinstance(raw_failures_value, list):
+            raise ValueError("source receipt failures must be a list of text values")
+        raw_failures = cast(list[object], raw_failures_value)
+        failures = tuple(
+            failure for failure in raw_failures if isinstance(failure, str)
+        )
+        if len(failures) != len(raw_failures):
+            raise ValueError("source receipt failures must be a list of text values")
+        partial = collection.receipt.get("partial", False)
+        if not isinstance(partial, bool):
+            raise ValueError("source receipt partial value must be a boolean")
+        source_health.append(
+            SourceHealth(
+                source_name=configured_source.name,
+                status="completed",
+                partial=partial,
+                failures=failures,
+            )
+        )
+    if not collections:
+        raise SourceError(
+            "all configured sources failed: " + "; ".join(failed_messages)
+        )
+    report_jobs: list[ReportJob] = []
+    llm_configuration = LlmConfiguration.from_environment(environment)
+    accepted = 0
+    for collection in collections:
+        observations = {
+            (item.job.source_name, item.job.source_job_id): item
+            for item in collection.observations
+        }
+        accepted += len(collection.observation_results)
+        for result in collection.observation_results:
+            observation = observations[(result.source_name, result.source_job_id)]
+            evaluation = evaluate_job(loaded, observation.job)
+            evaluation_id = repository.store_evaluation(
+                result.job_version_id,
+                loaded.profile_hash,
+                loaded.strategy_hash,
+                evaluation.to_json_bytes(),
+                finished_at,
+            )
+            assessment = assess_job(
+                llm_configuration, loaded.strategy, observation.job, evaluation
+            )
+            store_assessment(repository, evaluation_id, assessment, finished_at)
+            if result.outcome in ("new", "changed"):
+                report_jobs.append(
+                    ReportJob(
+                        job=observation.job,
+                        outcome=result.outcome,
+                        observed_at=observation.observed_at,
+                        evaluation=evaluation,
+                        assessment=assessment,
+                    )
+                )
     report_path = data_directory / "reports" / f"daily-{finished_at[:10]}.md"
     DailyReportService(repository).create_and_deliver(
         report_date=finished_at[:10],
         jobs=tuple(report_jobs),
-        source_health=(
-            SourceHealth(
-                source_name=source.name,
-                status="completed",
-                partial=partial,
-                failures=failures,
-            ),
-        ),
+        source_health=tuple(source_health),
         display_limit=int(environment.get("CAREER_MONITOR_DISPLAY_LIMIT", "25")),
         created_at=finished_at,
         deliveries=(FileDelivery(report_path),),
     )
     return {
-        "accepted": len(collection.observation_results),
-        "evaluated": len(collection.observation_results),
+        "accepted": accepted,
+        "evaluated": accepted,
         "new_or_changed": len(report_jobs),
         "report": str(report_path),
-        "source_partial": partial,
+        "sources_hash": loaded.sources_hash,
+        "source_failures": source_failures,
+        "source_partial": any(health.partial for health in source_health),
     }
 
 

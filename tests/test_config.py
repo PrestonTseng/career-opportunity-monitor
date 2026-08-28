@@ -22,10 +22,25 @@ def _strategy_dict() -> dict[str, object]:
     return cast(dict[str, object], strategy)
 
 
+def _sources_dict() -> dict[str, object]:
+    sources = yaml.safe_load((STRATEGY_DIR / "sources.yaml").read_text())
+    assert isinstance(sources, dict)
+    return cast(dict[str, object], sources)
+
+
 def _write_strategy(tmp_path: Path, strategy: dict[str, object]) -> Path:
     directory = tmp_path / "strategy"
     directory.mkdir()
     (directory / "strategy.yaml").write_text(yaml.safe_dump(strategy), encoding="utf-8")
+    shutil.copyfile(STRATEGY_DIR / "sources.yaml", directory / "sources.yaml")
+    return directory
+
+
+def _write_configuration(tmp_path: Path, sources: dict[str, object]) -> Path:
+    directory = tmp_path / "configuration"
+    directory.mkdir()
+    shutil.copyfile(STRATEGY_DIR / "strategy.yaml", directory / "strategy.yaml")
+    (directory / "sources.yaml").write_text(yaml.safe_dump(sources), encoding="utf-8")
     return directory
 
 
@@ -44,6 +59,20 @@ def test_load_configuration_compiles_repeatable_snapshot() -> None:
     assert first.strategy.llm_adjustment_maximum == 5
 
 
+def test_load_configuration_compiles_versioned_sources_in_document_order() -> None:
+    loaded = load_configuration(RESUME, STRATEGY_DIR)
+
+    assert [source.id for source in loaded.sources] == [
+        "example-workday",
+        "nvidia-workday-example",
+    ]
+    assert loaded.sources[0].adapter == "workday"
+    assert loaded.sources[0].origin == "https://example.wd5.myworkdayjobs.com"
+    assert loaded.sources[1].enabled is False
+    assert len(loaded.sources_hash) == 64
+    assert (STRATEGY_DIR / "sources.yaml").read_bytes() in loaded.sources_snapshot_bytes
+
+
 def test_loaded_configuration_carries_hashed_validated_snapshot_bytes() -> None:
     loaded = load_configuration(RESUME, STRATEGY_DIR)
 
@@ -57,6 +86,50 @@ def test_loaded_configuration_carries_hashed_validated_snapshot_bytes() -> None:
     assert (STRATEGY_DIR / "strategy.yaml").read_bytes() in (
         loaded.strategy_snapshot_bytes
     )
+
+
+def test_load_configuration_rejects_duplicate_source_ids(tmp_path: Path) -> None:
+    sources = _sources_dict()
+    entries = cast(list[object], sources["sources"])
+    duplicate = copy.deepcopy(entries[0])
+    entries.append(duplicate)
+
+    with pytest.raises(ConfigError, match="duplicate source id"):
+        load_configuration(RESUME, _write_configuration(tmp_path, sources))
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "http://jobs.example.com",
+        "https://user@jobs.example.com",
+        "https://jobs.example.com/#fragment",
+        "https://localhost",
+        "https://127.0.0.1",
+        "https://169.254.169.254",
+        "https://jobs.example.com.evil.invalid/path",
+    ],
+)
+def test_load_configuration_rejects_unapproved_source_origins(
+    tmp_path: Path, origin: str
+) -> None:
+    sources = _sources_dict()
+    entries = cast(list[object], sources["sources"])
+    first = cast(dict[str, object], entries[0])
+    first["origin"] = origin
+
+    with pytest.raises(ConfigError, match="source origin"):
+        load_configuration(RESUME, _write_configuration(tmp_path, sources))
+
+
+def test_load_configuration_rejects_unknown_adapter(tmp_path: Path) -> None:
+    sources = _sources_dict()
+    entries = cast(list[object], sources["sources"])
+    first = cast(dict[str, object], entries[0])
+    first["adapter"] = "python-entry-point"
+
+    with pytest.raises(ConfigError, match="invalid sources at sources.0.adapter"):
+        load_configuration(RESUME, _write_configuration(tmp_path, sources))
 
 
 def test_load_configuration_rejects_invalid_ranking_invariants(

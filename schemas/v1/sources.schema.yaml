@@ -1,0 +1,97 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "https://career-monitor.example/schemas/v1/sources.schema.json"
+title: Approved job sources version 1
+type: object
+additionalProperties: false
+required:
+  - schema_version
+  - sources
+properties:
+  schema_version:
+    const: 1
+  sources:
+    type: array
+    minItems: 1
+    maxItems: 32
+    items:
+      $ref: "#/$defs/source"
+$defs:
+  source:
+    type: object
+    additionalProperties: false
+    required:
+      - id
+      - enabled
+      - adapter
+      - origin
+      - tenant
+      - site
+      - company
+      - search_text
+      - options
+    properties:
+      id:
+        type: string
+        pattern: "^[a-z][a-z0-9-]{2,63}$"
+      enabled:
+        type: boolean
+      adapter:
+        enum:
+          - workday
+      origin:
+        type: string
+        minLength: 12
+        maxLength: 253
+      tenant:
+        type: string
+        pattern: "^[A-Za-z0-9][A-Za-z0-9-]{0,63}$"
+      site:
+        type: string
+        pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+      company:
+        type: string
+        minLength: 1
+        maxLength: 120
+      search_text:
+        type: string
+        maxLength: 120
+      options:
+        type: object
+        additionalProperties: false
+        required:
+          - page_size
+          - max_pages
+          - max_requests
+          - timeout_seconds
+          - response_limit_bytes
+          - retries
+          - rate_limit_seconds
+        properties:
+          page_size:
+            type: integer
+            minimum: 1
+            maximum: 100
+          max_pages:
+            type: integer
+            minimum: 1
+            maximum: 100
+          max_requests:
+            type: integer
+            minimum: 1
+            maximum: 1000
+          timeout_seconds:
+            type: number
+            exclusiveMinimum: 0
+            maximum: 60
+          response_limit_bytes:
+            type: integer
+            minimum: 1
+            maximum: 5000000
+          retries:
+            type: integer
+            minimum: 0
+            maximum: 3
+          rate_limit_seconds:
+            type: number
+            minimum: 0
+            maximum: 60

@@ -1,6 +1,7 @@
 # Career Opportunity Monitor
 
-Career Opportunity Monitor is a self-hosted job monitor. It reads NVIDIA Taiwan jobs from the public NVIDIA Workday service.
+Career Opportunity Monitor is a self-hosted job monitor. It reads explicitly
+configured public Workday job sources.
 
 The monitor keeps job history in SQLite. It scores jobs against a private resume profile and a private strategy.
 
@@ -50,7 +51,10 @@ The dry run does not contact the source. The live daily command creates a Markdo
 
 Do not edit the fictional examples with private values. Put private files outside Git, or put them under the ignored `.runtime/` directory.
 
-Set `CAREER_MONITOR_RESUME_FILE` to the resume-facts file. Set `CAREER_MONITOR_CONFIG_DIR` to the strategy directory.
+Set `CAREER_MONITOR_RESUME_FILE` to the resume-facts file. Set
+`CAREER_MONITOR_CONFIG_DIR` to a directory that contains `strategy.yaml` and
+`sources.yaml`. The source document is an ordered allowlist. Only enabled
+sources run.
 
 Compose mounts both paths as read-only files. The monitor writes history, receipts, errors, and reports only to `/data`.
 

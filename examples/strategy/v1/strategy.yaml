@@ -1,9 +1,5 @@
 schema_version: 1
 strategy_id: taiwan-software-fictional
-validation_source:
-  company: NVIDIA
-  platform: workday
-  country_code: TW
 role_targets:
   - Software Engineer
   - Data Engineer

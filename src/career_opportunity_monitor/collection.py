@@ -4,9 +4,8 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from .nvidia_workday import SourceError
 from .repository import ObservationResult, Repository, SourceObservation
-from .source import JobSource
+from .source import JobSource, SourceError
 
 
 @dataclass(frozen=True)

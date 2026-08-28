@@ -111,6 +111,10 @@ class Repository(Protocol):
         self, strategy_hash: str, snapshot_bytes: bytes, created_at: str
     ) -> None: ...
 
+    def store_sources_snapshot(
+        self, sources_hash: str, snapshot_bytes: bytes, created_at: str
+    ) -> None: ...
+
     def store_evaluation(
         self,
         job_version_id: int,

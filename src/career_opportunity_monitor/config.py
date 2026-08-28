@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import os
 import re
 import stat
@@ -11,6 +12,7 @@ from decimal import Decimal
 from importlib.resources import files
 from pathlib import Path
 from typing import cast
+from urllib.parse import urlsplit
 
 import yaml
 from jsonschema import Draft202012Validator
@@ -25,7 +27,10 @@ from .models import (
     LoadedConfiguration,
     Market,
     ResumeFact,
+    SourceAdapter,
+    SourceConfiguration,
     Strategy,
+    WorkdayOptions,
 )
 
 
@@ -252,6 +257,87 @@ def _compile_strategy(value: object) -> Strategy:
     )
 
 
+def _approved_origin(value: str) -> str:
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise ConfigError("source origin is ambiguous") from exc
+    hostname = parsed.hostname
+    if (
+        parsed.scheme != "https"
+        or hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+        or parsed.netloc != hostname
+        or hostname != hostname.lower()
+        or hostname.endswith(".")
+        or "%" in hostname
+    ):
+        raise ConfigError("source origin must be an unambiguous HTTPS origin")
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        raise ConfigError(
+            "source origin must not target localhost or a private address"
+        )
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        labels = hostname.split(".")
+        if len(labels) < 2 or any(
+            not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+            for label in labels
+        ):
+            raise ConfigError("source origin has an invalid host") from None
+    else:
+        if not address.is_global:
+            raise ConfigError(
+                "source origin must not target localhost or a private address"
+            )
+    return f"https://{hostname}"
+
+
+def _compile_sources(value: object) -> tuple[SourceConfiguration, ...]:
+    root = cast(dict[str, object], value)
+    raw_sources = cast(list[object], root["sources"])
+    sources: list[SourceConfiguration] = []
+    for raw_source in raw_sources:
+        source = cast(dict[str, object], raw_source)
+        raw_options = cast(dict[str, object], source["options"])
+        sources.append(
+            SourceConfiguration(
+                id=cast(str, source["id"]),
+                enabled=cast(bool, source["enabled"]),
+                adapter=cast(SourceAdapter, source["adapter"]),
+                origin=_approved_origin(cast(str, source["origin"])),
+                tenant=cast(str, source["tenant"]),
+                site=cast(str, source["site"]),
+                company=cast(str, source["company"]),
+                search_text=cast(str, source["search_text"]),
+                options=WorkdayOptions(
+                    page_size=cast(int, raw_options["page_size"]),
+                    max_pages=cast(int, raw_options["max_pages"]),
+                    max_requests=cast(int, raw_options["max_requests"]),
+                    timeout_seconds=float(
+                        cast(int | float, raw_options["timeout_seconds"])
+                    ),
+                    response_limit_bytes=cast(int, raw_options["response_limit_bytes"]),
+                    retries=cast(int, raw_options["retries"]),
+                    rate_limit_seconds=float(
+                        cast(int | float, raw_options["rate_limit_seconds"])
+                    ),
+                ),
+            )
+        )
+    ids = [source.id for source in sources]
+    if len(ids) != len(set(ids)):
+        raise ConfigError("duplicate source id")
+    return tuple(sources)
+
+
 def _assert_unchanged(path: Path, expected: _Fingerprint) -> None:
     try:
         current = _fingerprint(path.lstat())
@@ -276,17 +362,23 @@ def load_configuration(
         raise ConfigError("unsafe strategy directory shape")
 
     entries_before = tuple(sorted(path.name for path in strategy_directory.iterdir()))
-    if entries_before != ("strategy.yaml",):
-        raise ConfigError("strategy directory must contain exactly strategy.yaml")
+    if entries_before != ("sources.yaml", "strategy.yaml"):
+        raise ConfigError(
+            "configuration directory must contain exactly sources.yaml and "
+            "strategy.yaml"
+        )
 
     resume_raw, resume_fingerprint = _read_stable_regular(resume_path)
     strategy_path = strategy_directory / "strategy.yaml"
     strategy_raw, strategy_fingerprint = _read_stable_regular(strategy_path)
+    sources_path = strategy_directory / "sources.yaml"
+    sources_raw, sources_fingerprint = _read_stable_regular(sources_path)
     if after_read is not None:
         after_read()
 
     _assert_unchanged(resume_path, resume_fingerprint)
     _assert_unchanged(strategy_path, strategy_fingerprint)
+    _assert_unchanged(sources_path, sources_fingerprint)
     if _fingerprint(strategy_directory.lstat()) != _fingerprint(directory_before):
         raise ConfigError("strategy directory changed while reading")
     entries_after = tuple(sorted(path.name for path in strategy_directory.iterdir()))
@@ -295,16 +387,22 @@ def load_configuration(
 
     resume_value = _load_yaml(resume_raw, str(resume_path))
     strategy_value = _load_yaml(strategy_raw, str(strategy_path))
+    sources_value = _load_yaml(sources_raw, str(sources_path))
     _validate(resume_value, "resume-facts.schema.yaml", "resume profile")
     _validate(strategy_value, "strategy.schema.yaml", "strategy")
+    _validate(sources_value, "sources.schema.yaml", "sources")
 
     profile_snapshot = _snapshot_bytes(((resume_path.name, resume_raw),))
     strategy_snapshot = _snapshot_bytes((("strategy.yaml", strategy_raw),))
+    sources_snapshot = _snapshot_bytes((("sources.yaml", sources_raw),))
     return LoadedConfiguration(
         profile=_compile_profile(resume_value),
         strategy=_compile_strategy(strategy_value),
+        sources=_compile_sources(sources_value),
         profile_hash=hashlib.sha256(profile_snapshot).hexdigest(),
         strategy_hash=hashlib.sha256(strategy_snapshot).hexdigest(),
+        sources_hash=hashlib.sha256(sources_snapshot).hexdigest(),
         profile_snapshot_bytes=profile_snapshot,
         strategy_snapshot_bytes=strategy_snapshot,
+        sources_snapshot_bytes=sources_snapshot,
     )

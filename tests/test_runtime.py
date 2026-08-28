@@ -8,11 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from career_opportunity_monitor.nvidia_workday import SourceError
 from career_opportunity_monitor.ranking import parse_job
 from career_opportunity_monitor.repository import SourceObservation
 from career_opportunity_monitor.runtime import run
-from career_opportunity_monitor.source import SourceFetchResult
+from career_opportunity_monitor.source import SourceError, SourceFetchResult
 from career_opportunity_monitor.sqlite_repository import SQLiteRepository
 
 ROOT = Path(__file__).parents[1]
@@ -47,6 +46,8 @@ def test_validate_accepts_valid_runtime_mounts(
     output = json.loads(capsys.readouterr().out)
     assert output == {
         "command": "validate",
+        "configured_sources": 2,
+        "enabled_source_ids": ["example-workday"],
         "profile_id": "alex-chen-fictional",
         "status": "ok",
         "strategy_id": "taiwan-software-fictional",
@@ -145,10 +146,46 @@ class EmptyPartialSource:
 
 @dataclass(frozen=True)
 class FailedSource:
-    name: str = "nvidia-workday"
+    name: str = "failed-workday"
 
     def fetch(self) -> SourceFetchResult:
         raise SourceError("source collection failed: temporary outage")
+
+
+def test_daily_collects_configured_sources_in_order_and_isolates_one_failure(
+    tmp_path: Path,
+) -> None:
+    environment = _runtime_environment(tmp_path)
+    environment["CAREER_MONITOR_RUN_ID"] = "multi-source"
+    environment["CAREER_MONITOR_NOW"] = "2026-08-27T03:30:00Z"
+
+    exit_code = run(
+        ("daily",),
+        environment=environment,
+        sources=(
+            FixtureSource("first-workday"),
+            FailedSource(),
+            FixtureSource("second-workday"),
+        ),
+    )
+
+    assert exit_code == 0
+    data_directory = Path(environment["CAREER_MONITOR_DATA_DIR"])
+    report = (data_directory / "reports" / "daily-2026-08-27.md").read_text()
+    assert report.index("- first-workday.") < report.index("- failed-workday.")
+    assert report.index("- failed-workday.") < report.index("- second-workday.")
+    receipt = json.loads(
+        (data_directory / "receipts" / "daily-multi-source.json").read_text()
+    )
+    assert receipt["accepted"] == 2
+    assert receipt["source_failures"] == 1
+    repository = SQLiteRepository(data_directory / "history.sqlite3")
+    assert [repository.get_source_run(index).status for index in (1, 2, 3)] == [
+        "completed",
+        "failed",
+        "completed",
+    ]
+    repository.close()
 
 
 def test_daily_live_run_collects_scores_and_writes_report(
@@ -192,6 +229,7 @@ def test_daily_live_run_collects_scores_and_writes_report(
         "llm_assessments": 1,
         "profile_snapshots": 1,
         "reports": 1,
+        "sources_snapshots": 1,
         "strategy_snapshots": 1,
     }
     repository.close()

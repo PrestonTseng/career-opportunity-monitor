@@ -26,6 +26,7 @@ def test_source_package_exposes_version() -> None:
     [
         ("resume-facts.schema.yaml", "resume_facts.yaml"),
         ("strategy.schema.yaml", "strategy/v1/strategy.yaml"),
+        ("sources.schema.yaml", "strategy/v1/sources.yaml"),
         ("job.schema.yaml", "job.yaml"),
     ],
 )

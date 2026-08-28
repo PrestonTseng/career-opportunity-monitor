@@ -182,7 +182,7 @@ def render_daily_report(
         lines.append("The report displays no jobs.")
     lines.extend(("", "## Source health", ""))
     if source_health:
-        for health in sorted(source_health, key=lambda value: value.source_name):
+        for health in source_health:
             lines.extend(_source_health_lines(health))
     else:
         lines.append("The report has no source health receipt.")

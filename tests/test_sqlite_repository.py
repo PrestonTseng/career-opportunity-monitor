@@ -35,6 +35,7 @@ EXPECTED_TABLES = {
     "schema_migrations",
     "source_observations",
     "source_runs",
+    "sources_snapshots",
     "strategy_snapshots",
     "writer_lock",
 }
@@ -597,6 +598,7 @@ def test_evaluation_is_idempotent_and_bound_to_exact_snapshots(tmp_path: Path) -
         "llm_assessments": 0,
         "profile_snapshots": 1,
         "reports": 0,
+        "sources_snapshots": 0,
         "strategy_snapshots": 1,
     }
     with pytest.raises(RepositoryError, match="profile snapshot"):
@@ -627,9 +629,15 @@ def test_snapshots_accept_configuration_hash_domain(tmp_path: Path) -> None:
         configuration.strategy_snapshot_bytes,
         "2026-08-27T00:00:00Z",
     )
+    repository.store_sources_snapshot(
+        configuration.sources_hash,
+        configuration.sources_snapshot_bytes,
+        "2026-08-27T00:00:00Z",
+    )
 
     assert repository.artifact_counts()["profile_snapshots"] == 1
     assert repository.artifact_counts()["strategy_snapshots"] == 1
+    assert "sources_snapshots" in repository.table_names()
 
     repository.close()
 
@@ -711,6 +719,7 @@ def test_reports_feedback_and_optional_assessments_are_idempotent(
         "llm_assessments": 1,
         "profile_snapshots": 1,
         "reports": 1,
+        "sources_snapshots": 0,
         "strategy_snapshots": 1,
     }
 

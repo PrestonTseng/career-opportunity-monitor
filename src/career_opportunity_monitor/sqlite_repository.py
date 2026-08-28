@@ -139,6 +139,14 @@ CREATE TABLE writer_lock (
 ) STRICT;
 """
 
+_MIGRATION_2 = """
+CREATE TABLE sources_snapshots (
+    sources_hash TEXT PRIMARY KEY,
+    snapshot_bytes BLOB NOT NULL,
+    created_at TEXT NOT NULL
+) STRICT;
+"""
+
 
 class SQLiteRepository:
     """SQLite-backed durable history for a single career monitor installation."""
@@ -176,6 +184,20 @@ class SQLiteRepository:
                 + "PRAGMA user_version = 1;\n"
                 + "COMMIT;"
             )
+            version = 1
+        if version == 1:
+            self._connection.executescript(
+                "BEGIN IMMEDIATE;\n"
+                + _MIGRATION_2
+                + "\n"
+                + "INSERT INTO schema_migrations(version, applied_at) "
+                + "VALUES (2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));\n"
+                + "PRAGMA user_version = 2;\n"
+                + "COMMIT;"
+            )
+            version = 2
+        if version != 2:
+            raise RepositoryError(f"unsupported SQLite schema version: {version}")
 
     @property
     def foreign_keys_enabled(self) -> bool:
@@ -593,6 +615,17 @@ class SQLiteRepository:
             created_at,
         )
 
+    def store_sources_snapshot(
+        self, sources_hash: str, snapshot_bytes: bytes, created_at: str
+    ) -> None:
+        self._store_snapshot(
+            "sources_snapshots",
+            "sources_hash",
+            sources_hash,
+            snapshot_bytes,
+            created_at,
+        )
+
     def _store_snapshot(
         self,
         table: str,
@@ -673,6 +706,7 @@ class SQLiteRepository:
             "llm_assessments",
             "profile_snapshots",
             "reports",
+            "sources_snapshots",
             "strategy_snapshots",
         )
         return {
