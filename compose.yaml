@@ -27,6 +27,8 @@ x-runtime: &runtime
   secrets:
     - source: llm-api-key
       target: llm-api-key
+    - source: discord-webhook
+      target: discord-webhook
   volumes:
     - type: bind
       source: ${CAREER_MONITOR_RESUME_FILE:-./examples/resume_facts.yaml}
@@ -83,3 +85,5 @@ volumes:
 secrets:
   llm-api-key:
     file: ${CAREER_MONITOR_LLM_SECRET_FILE:-/dev/null}
+  discord-webhook:
+    file: ${CAREER_MONITOR_DISCORD_SECRET_FILE:-/dev/null}

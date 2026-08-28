@@ -26,6 +26,7 @@ from career_opportunity_monitor.repository import (
 from career_opportunity_monitor.sqlite_repository import SQLiteRepository
 
 EXPECTED_TABLES = {
+    "delivery_attempts",
     "evaluations",
     "feedback",
     "job_versions",
@@ -75,7 +76,7 @@ def _assert_legacy_database_migrates_to_latest(path: Path) -> None:
     repository = SQLiteRepository(path)
 
     connection = sqlite3.connect(path)
-    assert connection.execute("PRAGMA user_version").fetchone() == (3,)
+    assert connection.execute("PRAGMA user_version").fetchone() == (4,)
     sources_hash_column = next(
         row
         for row in connection.execute("PRAGMA table_info(source_runs)")

@@ -51,7 +51,9 @@ def test_validate_accepts_valid_runtime_mounts(
     output = json.loads(capsys.readouterr().out)
     assert output == {
         "command": "validate",
+        "configured_destinations": 1,
         "configured_sources": 2,
+        "enabled_destination_ids": [],
         "enabled_source_ids": ["example-workday"],
         "profile_id": "alex-chen-fictional",
         "status": "ok",

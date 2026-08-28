@@ -34,6 +34,11 @@ If a report delivery fails, retry the stored report bytes:
 docker compose --profile cli run --rm cli retry-delivery --report-date 2026-08-27
 ```
 
+Discord delivery is chunked at the destination limit. Acknowledged chunk hashes
+are stored in SQLite, so a retry resumes at the first unacknowledged chunk. The
+database evidence contains hashes and HTTP classes, never the webhook URL. A
+dry run makes no delivery request and records no successful delivery.
+
 A successful command prints one JSON receipt. A failed command prints an error and exits with a nonzero status.
 
 ## Backup

@@ -91,6 +91,10 @@ def _seed_test_volumes(
                 ROOT / "examples" / "strategy" / "v1" / "sources.yaml",
                 "/config/sources.yaml",
             ),
+            (
+                ROOT / "examples" / "strategy" / "v1" / "destinations.yaml",
+                "/config/destinations.yaml",
+            ),
             (ROOT / "deploy" / "crontab", "/etc/career-monitor/crontab"),
         ):
             subprocess.run(

@@ -1,7 +1,8 @@
 # Configuration and resume facts
 
 The monitor reads one resume-facts file and one configuration directory. The
-configuration directory must contain exactly `strategy.yaml` and `sources.yaml`.
+configuration directory must contain exactly `strategy.yaml`, `sources.yaml`,
+and `destinations.yaml`.
 
 Use the files in `examples/` as fictional templates. Do not put private values in public examples.
 
@@ -47,6 +48,18 @@ instances from `examples/strategy/v1/sources.yaml`. Do not add secrets.
 The source file must obey `schemas/v1/sources.schema.yaml`. Existing private
 configuration directories must add `sources.yaml` before upgrading.
 
+## Delivery destinations
+
+`destinations.yaml` is a versioned ordered list. Each Discord entry has a stable
+ID, an enabled switch, report cadences, and an absolute `webhook_url_file` path.
+The YAML file must never contain a webhook URL. Disabled entries are not opened.
+The fictional example is disabled.
+
+Create the webhook file outside Git as one private line. Set
+`CAREER_MONITOR_DISCORD_SECRET_FILE` to that host path. Compose mounts it at
+`/run/secrets/discord-webhook`. It is not passed in an environment value or CLI
+argument. Only approved Discord HTTPS webhook hosts are accepted.
+
 ## Compose paths
 
 Set the private input paths before you run Compose:
@@ -54,6 +67,7 @@ Set the private input paths before you run Compose:
 ```text
 export CAREER_MONITOR_RESUME_FILE="$PWD/private/resume_facts.yaml"
 export CAREER_MONITOR_CONFIG_DIR="$PWD/private/strategy/v1"
+export CAREER_MONITOR_DISCORD_SECRET_FILE="$PWD/private/discord-webhook"
 ```
 
 Compose mounts the resume file at `/profile/resume_facts.yaml`. It mounts the

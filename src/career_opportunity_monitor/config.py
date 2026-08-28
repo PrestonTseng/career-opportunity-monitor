@@ -22,10 +22,12 @@ from .models import (
     CATEGORIES,
     Category,
     CompiledProfile,
+    DestinationConfiguration,
     FactKind,
     FactStatus,
     LoadedConfiguration,
     Market,
+    ReportCadence,
     ResumeFact,
     SourceAdapter,
     SourceConfiguration,
@@ -338,6 +340,32 @@ def _compile_sources(value: object) -> tuple[SourceConfiguration, ...]:
     return tuple(sources)
 
 
+def _compile_destinations(value: object) -> tuple[DestinationConfiguration, ...]:
+    root = cast(dict[str, object], value)
+    raw_destinations = cast(list[object], root["destinations"])
+    destinations = tuple(
+        DestinationConfiguration(
+            id=cast(str, destination["id"]),
+            enabled=cast(bool, destination["enabled"]),
+            type="discord",
+            report_cadences=tuple(
+                cast(list[ReportCadence], destination["report_cadences"])
+            ),
+            webhook_url_file=Path(cast(str, destination["webhook_url_file"])),
+        )
+        for raw_destination in raw_destinations
+        for destination in (cast(dict[str, object], raw_destination),)
+    )
+    ids = [destination.id for destination in destinations]
+    if len(ids) != len(set(ids)):
+        raise ConfigError("duplicate destination id")
+    if any(
+        not destination.webhook_url_file.is_absolute() for destination in destinations
+    ):
+        raise ConfigError("destination webhook URL file must be absolute")
+    return destinations
+
+
 def _assert_unchanged(path: Path, expected: _Fingerprint) -> None:
     try:
         current = _fingerprint(path.lstat())
@@ -362,10 +390,10 @@ def load_configuration(
         raise ConfigError("unsafe strategy directory shape")
 
     entries_before = tuple(sorted(path.name for path in strategy_directory.iterdir()))
-    if entries_before != ("sources.yaml", "strategy.yaml"):
+    if entries_before != ("destinations.yaml", "sources.yaml", "strategy.yaml"):
         raise ConfigError(
-            "configuration directory must contain exactly sources.yaml and "
-            "strategy.yaml"
+            "configuration directory must contain exactly destinations.yaml, "
+            "sources.yaml, and strategy.yaml"
         )
 
     resume_raw, resume_fingerprint = _read_stable_regular(resume_path)
@@ -373,12 +401,15 @@ def load_configuration(
     strategy_raw, strategy_fingerprint = _read_stable_regular(strategy_path)
     sources_path = strategy_directory / "sources.yaml"
     sources_raw, sources_fingerprint = _read_stable_regular(sources_path)
+    destinations_path = strategy_directory / "destinations.yaml"
+    destinations_raw, destinations_fingerprint = _read_stable_regular(destinations_path)
     if after_read is not None:
         after_read()
 
     _assert_unchanged(resume_path, resume_fingerprint)
     _assert_unchanged(strategy_path, strategy_fingerprint)
     _assert_unchanged(sources_path, sources_fingerprint)
+    _assert_unchanged(destinations_path, destinations_fingerprint)
     if _fingerprint(strategy_directory.lstat()) != _fingerprint(directory_before):
         raise ConfigError("strategy directory changed while reading")
     entries_after = tuple(sorted(path.name for path in strategy_directory.iterdir()))
@@ -388,21 +419,27 @@ def load_configuration(
     resume_value = _load_yaml(resume_raw, str(resume_path))
     strategy_value = _load_yaml(strategy_raw, str(strategy_path))
     sources_value = _load_yaml(sources_raw, str(sources_path))
+    destinations_value = _load_yaml(destinations_raw, str(destinations_path))
     _validate(resume_value, "resume-facts.schema.yaml", "resume profile")
     _validate(strategy_value, "strategy.schema.yaml", "strategy")
     _validate(sources_value, "sources.schema.yaml", "sources")
+    _validate(destinations_value, "destinations.schema.yaml", "destinations")
 
     profile_snapshot = _snapshot_bytes(((resume_path.name, resume_raw),))
     strategy_snapshot = _snapshot_bytes((("strategy.yaml", strategy_raw),))
     sources_snapshot = _snapshot_bytes((("sources.yaml", sources_raw),))
+    destinations_snapshot = _snapshot_bytes((("destinations.yaml", destinations_raw),))
     return LoadedConfiguration(
         profile=_compile_profile(resume_value),
         strategy=_compile_strategy(strategy_value),
         sources=_compile_sources(sources_value),
+        destinations=_compile_destinations(destinations_value),
         profile_hash=hashlib.sha256(profile_snapshot).hexdigest(),
         strategy_hash=hashlib.sha256(strategy_snapshot).hexdigest(),
         sources_hash=hashlib.sha256(sources_snapshot).hexdigest(),
+        destinations_hash=hashlib.sha256(destinations_snapshot).hexdigest(),
         profile_snapshot_bytes=profile_snapshot,
         strategy_snapshot_bytes=strategy_snapshot,
         sources_snapshot_bytes=sources_snapshot,
+        destinations_snapshot_bytes=destinations_snapshot,
     )

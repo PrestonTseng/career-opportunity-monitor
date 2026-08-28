@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
 from typing import Literal
 
 Category = Literal["title", "skills", "experience", "location", "company"]
@@ -11,6 +12,7 @@ FactKind = Literal[
 ]
 FactStatus = Literal["confirmed", "planned"]
 SourceAdapter = Literal["workday"]
+ReportCadence = Literal["daily", "weekly"]
 
 CATEGORIES: tuple[Category, ...] = (
     "title",
@@ -92,16 +94,28 @@ class SourceConfiguration:
 
 
 @dataclass(frozen=True)
+class DestinationConfiguration:
+    id: str
+    enabled: bool
+    type: Literal["discord"]
+    report_cadences: tuple[ReportCadence, ...]
+    webhook_url_file: Path
+
+
+@dataclass(frozen=True)
 class LoadedConfiguration:
     profile: CompiledProfile
     strategy: Strategy
     sources: tuple[SourceConfiguration, ...]
+    destinations: tuple[DestinationConfiguration, ...]
     profile_hash: str
     strategy_hash: str
     sources_hash: str
+    destinations_hash: str
     profile_snapshot_bytes: bytes
     strategy_snapshot_bytes: bytes
     sources_snapshot_bytes: bytes
+    destinations_snapshot_bytes: bytes
 
 
 WorkMode = Literal["office", "hybrid", "remote", "unknown"]

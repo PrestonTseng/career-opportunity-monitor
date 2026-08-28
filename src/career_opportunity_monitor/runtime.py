@@ -6,18 +6,20 @@ import json
 import os
 import sys
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
 from .collection import CollectionResult, CollectionService
 from .config import ConfigError, load_configuration
+from .discord_delivery import DiscordDelivery
 from .llm_adjustment import LlmConfiguration, assess_job, store_assessment
 from .models import LoadedConfiguration
 from .ranking import evaluate_job
 from .reporting import (
     DailyReportService,
+    Delivery,
     DeliveryError,
     FileDelivery,
     ReportJob,
@@ -78,6 +80,12 @@ def run(
                 {
                     "command": arguments.command,
                     "configured_sources": len(configuration.sources),
+                    "configured_destinations": len(configuration.destinations),
+                    "enabled_destination_ids": [
+                        destination.id
+                        for destination in configuration.destinations
+                        if destination.enabled
+                    ],
                     "enabled_source_ids": [
                         source.id for source in configuration.sources if source.enabled
                     ],
@@ -139,11 +147,19 @@ def run(
                         finished_at=finished_at,
                     )
                 )
-            elif arguments.command == "retry-delivery":
+            elif arguments.command == "retry-delivery" and not arguments.dry_run:
                 report_date = _required_report_date(arguments.report_date)
                 report_path = data_directory / "reports" / f"daily-{report_date}.md"
                 DailyReportService(repository).retry_delivery(
-                    f"daily:{report_date}", (FileDelivery(report_path),)
+                    f"daily:{report_date}",
+                    build_deliveries(
+                        configuration,
+                        cadence="daily",
+                        report_key=f"daily:{report_date}",
+                        report_path=report_path,
+                        repository=repository,
+                        now=lambda: finished_at,
+                    ),
                 )
                 receipt["report"] = str(report_path)
             _write_json(receipt_path, receipt)
@@ -296,7 +312,14 @@ def _run_daily(
         source_health=tuple(source_health),
         display_limit=int(environment.get("CAREER_MONITOR_DISPLAY_LIMIT", "25")),
         created_at=finished_at,
-        deliveries=(FileDelivery(report_path),),
+        deliveries=build_deliveries(
+            loaded,
+            cadence="daily",
+            report_key=f"daily:{finished_at[:10]}",
+            report_path=report_path,
+            repository=repository,
+            now=lambda: finished_at,
+        ),
     )
     return {
         "accepted": accepted,
@@ -307,6 +330,30 @@ def _run_daily(
         "source_failures": source_failures,
         "source_partial": any(health.partial for health in source_health),
     }
+
+
+def build_deliveries(
+    configuration: LoadedConfiguration,
+    *,
+    cadence: str,
+    report_key: str,
+    report_path: Path,
+    repository: SQLiteRepository,
+    now: Callable[[], str],
+) -> tuple[Delivery, ...]:
+    deliveries: list[Delivery] = [FileDelivery(report_path)]
+    deliveries.extend(
+        DiscordDelivery(
+            destination_id=destination.id,
+            report_key=report_key,
+            webhook_url_file=destination.webhook_url_file,
+            repository=repository,
+            now=now,
+        )
+        for destination in configuration.destinations
+        if destination.enabled and cadence in destination.report_cadences
+    )
+    return tuple(deliveries)
 
 
 def _validate_data_directory(path: Path) -> None:

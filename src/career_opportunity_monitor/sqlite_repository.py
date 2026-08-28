@@ -189,6 +189,30 @@ DROP TABLE source_runs;
 ALTER TABLE source_runs_v3 RENAME TO source_runs;
 """
 
+_MIGRATION_4 = """
+CREATE TABLE delivery_attempts (
+    id INTEGER PRIMARY KEY,
+    report_id INTEGER NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
+    report_key TEXT NOT NULL REFERENCES reports(report_key) ON DELETE CASCADE,
+    report_hash TEXT NOT NULL,
+    destination_id TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
+    chunk_count INTEGER NOT NULL CHECK (chunk_count > 0 AND chunk_index < chunk_count),
+    chunk_hash TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN (
+        'acknowledged', 'failed', 'rate_limited', 'retryable_failure'
+    )),
+    attempted_at TEXT NOT NULL,
+    http_class TEXT NOT NULL,
+    idempotency_state TEXT NOT NULL CHECK (
+        idempotency_state IN ('pending', 'acknowledged')
+    )
+) STRICT;
+CREATE INDEX delivery_attempt_ack_lookup ON delivery_attempts(
+    report_key, report_hash, destination_id, chunk_index, chunk_hash, status
+);
+"""
+
 
 class SQLiteRepository:
     """SQLite-backed durable history for a single career monitor installation."""
@@ -251,7 +275,16 @@ class SQLiteRepository:
                 + "PRAGMA foreign_keys = ON;"
             )
             version = 3
-        if version != 3:
+        if version == 3:
+            self._connection.executescript(
+                "BEGIN IMMEDIATE;\n"
+                + _MIGRATION_4
+                + "\nINSERT INTO schema_migrations(version, applied_at) "
+                + "VALUES (4, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));\n"
+                + "PRAGMA user_version = 4;\nCOMMIT;"
+            )
+            version = 4
+        if version != 4:
             raise RepositoryError(f"unsupported SQLite schema version: {version}")
         legacy = self._connection.execute(
             "SELECT snapshot_bytes FROM sources_snapshots WHERE sources_hash = ?",
@@ -811,6 +844,51 @@ class SQLiteRepository:
         if row is None:
             raise RepositoryError("report does not exist")
         return bytes(row[0])
+
+    def delivery_chunk_acknowledged(
+        self,
+        report_key: str,
+        report_hash: str,
+        destination_id: str,
+        chunk_index: int,
+        chunk_hash: str,
+    ) -> bool:
+        row = self._connection.execute(
+            "SELECT 1 FROM delivery_attempts WHERE report_key = ? "
+            "AND report_hash = ? AND destination_id = ? AND chunk_index = ? "
+            "AND chunk_hash = ? AND status = 'acknowledged' LIMIT 1",
+            (report_key, report_hash, destination_id, chunk_index, chunk_hash),
+        ).fetchone()
+        return row is not None
+
+    def record_delivery_attempt(self, **values: object) -> None:
+        report_key = values.get("report_key")
+        report = self._connection.execute(
+            "SELECT id FROM reports WHERE report_key = ?", (report_key,)
+        ).fetchone()
+        if report is None:
+            raise RepositoryError("invalid delivery attempt evidence")
+        columns = (
+            "report_id",
+            "report_key",
+            "report_hash",
+            "destination_id",
+            "chunk_index",
+            "chunk_count",
+            "chunk_hash",
+            "status",
+            "attempted_at",
+            "http_class",
+            "idempotency_state",
+        )
+        try:
+            self._connection.execute(
+                "INSERT INTO delivery_attempts(" + ",".join(columns) + ") "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (int(report[0]), *(values[column] for column in columns[1:])),
+            )
+        except (KeyError, sqlite3.IntegrityError) as exc:
+            raise RepositoryError("invalid delivery attempt evidence") from exc
 
     def store_feedback(
         self, job_id: int, key: str, content: bytes, created_at: str

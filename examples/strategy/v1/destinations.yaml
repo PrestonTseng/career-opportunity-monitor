@@ -1,0 +1,8 @@
+schema_version: 1
+destinations:
+  - id: discord-alerts-example
+    enabled: false
+    type: discord
+    report_cadences:
+      - daily
+    webhook_url_file: /run/secrets/discord-webhook

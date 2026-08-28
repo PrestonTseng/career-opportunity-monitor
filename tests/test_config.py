@@ -33,6 +33,7 @@ def _write_strategy(tmp_path: Path, strategy: dict[str, object]) -> Path:
     directory.mkdir()
     (directory / "strategy.yaml").write_text(yaml.safe_dump(strategy), encoding="utf-8")
     shutil.copyfile(STRATEGY_DIR / "sources.yaml", directory / "sources.yaml")
+    shutil.copyfile(STRATEGY_DIR / "destinations.yaml", directory / "destinations.yaml")
     return directory
 
 
@@ -41,6 +42,7 @@ def _write_configuration(tmp_path: Path, sources: dict[str, object]) -> Path:
     directory.mkdir()
     shutil.copyfile(STRATEGY_DIR / "strategy.yaml", directory / "strategy.yaml")
     (directory / "sources.yaml").write_text(yaml.safe_dump(sources), encoding="utf-8")
+    shutil.copyfile(STRATEGY_DIR / "destinations.yaml", directory / "destinations.yaml")
     return directory
 
 

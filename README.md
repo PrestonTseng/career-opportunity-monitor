@@ -45,16 +45,19 @@ The files in `examples/` describe a fictional person. Replace them only after th
    docker compose --profile cli run --rm --entrypoint sh cli -c 'cat /data/reports/daily-*.md'
    ```
 
-The dry run does not contact the source. The live daily command creates a Markdown report but does not send applications or messages.
+The dry run does not contact a source or delivery destination. The live daily
+command creates a Markdown report. It sends the report only to enabled,
+explicitly configured destinations. It never sends applications.
 
 ## Private setup
 
 Do not edit the fictional examples with private values. Put private files outside Git, or put them under the ignored `.runtime/` directory.
 
 Set `CAREER_MONITOR_RESUME_FILE` to the resume-facts file. Set
-`CAREER_MONITOR_CONFIG_DIR` to a directory that contains `strategy.yaml` and
-`sources.yaml`. The source document is an ordered allowlist. Only enabled
-sources run.
+`CAREER_MONITOR_CONFIG_DIR` to a directory that contains `strategy.yaml`,
+`sources.yaml`, and `destinations.yaml`. Source and destination documents are
+ordered allowlists. Only enabled entries run. Webhook values belong only in
+mounted secret files, never in YAML or environment values.
 
 Compose mounts both paths as read-only files. The monitor writes history, receipts, errors, and reports only to `/data`.
 
