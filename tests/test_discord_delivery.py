@@ -5,9 +5,11 @@ import threading
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
+import career_opportunity_monitor.discord_delivery as discord_delivery_module
 from career_opportunity_monitor.discord_delivery import (
     DiscordDelivery,
     DiscordResponse,
@@ -15,6 +17,7 @@ from career_opportunity_monitor.discord_delivery import (
     chunk_discord_content,
     post_discord_request,
     read_discord_webhook_url,
+    request_discord,
 )
 from career_opportunity_monitor.reporting import DeliveryError
 
@@ -43,6 +46,24 @@ class EvidenceRepository:
 
     def record_delivery_attempt(self, **values: object) -> None:
         self.attempts.append(values)
+
+    def delivery_chunk_indeterminate(
+        self,
+        report_key: str,
+        report_hash: str,
+        destination_id: str,
+        chunk_index: int,
+        chunk_hash: str,
+    ) -> bool:
+        return any(
+            row["report_key"] == report_key
+            and row["report_hash"] == report_hash
+            and row["destination_id"] == destination_id
+            and row["chunk_index"] == chunk_index
+            and row["chunk_hash"] == chunk_hash
+            and row["idempotency_state"] == "indeterminate"
+            for row in self.attempts
+        )
 
 
 @dataclass
@@ -179,13 +200,12 @@ def test_non_retryable_4xx_is_explicit_and_sanitized(
     assert repository.attempts[-1]["http_class"] == "4xx"
 
 
-def test_5xx_timeout_and_429_retry_then_acknowledge(tmp_path: Path) -> None:
+def test_5xx_and_429_retry_then_acknowledge(tmp_path: Path) -> None:
     repository = EvidenceRepository()
     sleeps: list[float] = []
     requester = ScriptedRequester(
         [
             DiscordResponse(500, b""),
-            DiscordTransportError("timeout TOKEN"),
             DiscordResponse(429, b'{"retry_after":0.25}'),
             DiscordResponse(204, b""),
         ]
@@ -196,7 +216,7 @@ def test_5xx_timeout_and_429_retry_then_acknowledge(tmp_path: Path) -> None:
         webhook_url_file=_secret(tmp_path),
         repository=repository,
         requester=requester,
-        retries=3,
+        retries=2,
         sleep=sleeps.append,
     )
 
@@ -204,11 +224,34 @@ def test_5xx_timeout_and_429_retry_then_acknowledge(tmp_path: Path) -> None:
 
     assert [row["status"] for row in repository.attempts] == [
         "retryable_failure",
-        "retryable_failure",
         "rate_limited",
         "acknowledged",
     ]
     assert sleeps == [0.25]
+    assert "TOKEN" not in repr(repository.attempts)
+
+
+def test_timeout_is_indeterminate_and_never_silently_retried(tmp_path: Path) -> None:
+    repository = EvidenceRepository()
+    requester = ScriptedRequester(
+        [DiscordTransportError("timeout TOKEN"), DiscordResponse(204, b"")]
+    )
+    delivery = DiscordDelivery(
+        destination_id="alerts",
+        report_key="daily:x",
+        webhook_url_file=_secret(tmp_path),
+        repository=repository,
+        requester=requester,
+        retries=3,
+    )
+
+    with pytest.raises(DeliveryError, match="indeterminate"):
+        delivery.deliver(b"report")
+    with pytest.raises(DeliveryError, match="indeterminate"):
+        delivery.deliver(b"report")
+
+    assert len(requester.payloads) == 1
+    assert repository.attempts[-1]["idempotency_state"] == "indeterminate"
     assert "TOKEN" not in repr(repository.attempts)
 
 
@@ -317,3 +360,34 @@ def test_local_http_fixture_observes_post_and_redirect_is_not_followed() -> None
     assert success == DiscordResponse(204, b"")
     assert redirect.status == 302
     assert requests == [b"{}", b"{}"]
+
+
+def test_request_pins_a_verified_dns_address() -> None:
+    captured: list[str | None] = []
+
+    def fake_getaddrinfo(*args: object, **kwargs: object) -> list[object]:
+        return [
+            (2, 1, 6, "", ("8.8.8.8", 443)),
+            (2, 1, 6, "", ("1.1.1.1", 443)),
+        ]
+
+    def fake_post(
+        url: str,
+        payload: bytes,
+        timeout_seconds: float,
+        *,
+        approved_address: str | None = None,
+    ) -> DiscordResponse:
+        captured.append(approved_address)
+        return DiscordResponse(204, b"")
+
+    with (
+        patch.object(discord_delivery_module.socket, "getaddrinfo", fake_getaddrinfo),
+        patch.object(discord_delivery_module, "post_discord_request", fake_post),
+    ):
+        response = request_discord(
+            "https://discord.com/api/webhooks/123/TOKEN", b"{}", 1
+        )
+
+    assert response == DiscordResponse(204, b"")
+    assert captured == ["1.1.1.1"]

@@ -5,12 +5,14 @@ import ipaddress
 import json
 import os
 import socket
+import ssl
 import stat
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
+from http.client import HTTPException, HTTPSConnection
 from pathlib import Path
 from typing import Protocol, cast
 from urllib.parse import urlsplit
@@ -41,6 +43,15 @@ class DiscordRequester(Protocol):
 
 class DeliveryEvidenceRepository(Protocol):
     def delivery_chunk_acknowledged(
+        self,
+        report_key: str,
+        report_hash: str,
+        destination_id: str,
+        chunk_index: int,
+        chunk_hash: str,
+    ) -> bool: ...
+
+    def delivery_chunk_indeterminate(
         self,
         report_key: str,
         report_hash: str,
@@ -158,7 +169,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def _ensure_public_discord_host(url: str) -> None:
+def _verified_discord_address(url: str) -> str:
     hostname = urlsplit(url).hostname
     if hostname not in _DISCORD_HOSTS:
         raise DiscordTransportError("destination host is not approved")
@@ -166,16 +177,68 @@ def _ensure_public_discord_host(url: str) -> None:
         answers = socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
     except OSError as exc:
         raise DiscordTransportError("destination DNS lookup failed") from exc
-    addresses = {answer[4][0] for answer in answers}
-    if not addresses or any(
-        not ipaddress.ip_address(value).is_global for value in addresses
-    ):
+    addresses = {str(answer[4][0]) for answer in answers}
+    try:
+        unsafe = not addresses or any(
+            not ipaddress.ip_address(value).is_global for value in addresses
+        )
+    except ValueError as exc:
+        raise DiscordTransportError("destination DNS answer is invalid") from exc
+    if unsafe:
         raise DiscordTransportError("destination DNS answer is not public")
+    return sorted(addresses)[0]
+
+
+class _PinnedHTTPSConnection(HTTPSConnection):
+    def __init__(self, host: str, address: str, timeout: float) -> None:
+        super().__init__(host, 443, timeout=timeout)
+        self._approved_address = address
+        self._ssl_context = ssl.create_default_context()
+
+    def connect(self) -> None:
+        raw_socket = socket.create_connection(
+            (self._approved_address, 443), self.timeout
+        )
+        self.sock = self._ssl_context.wrap_socket(raw_socket, server_hostname=self.host)
+
+
+def _post_pinned_discord_request(
+    url: str, payload: bytes, timeout_seconds: float, approved_address: str
+) -> DiscordResponse:
+    parsed = urlsplit(url)
+    hostname = parsed.hostname
+    if hostname is None:
+        raise DiscordTransportError("destination host is invalid")
+    connection = _PinnedHTTPSConnection(hostname, approved_address, timeout_seconds)
+    try:
+        connection.request(
+            "POST",
+            parsed.path,
+            body=payload,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "career-monitor/0.1",
+            },
+        )
+        response = connection.getresponse()
+        return DiscordResponse(response.status, response.read(65537))
+    except (OSError, HTTPException, TimeoutError) as exc:
+        raise DiscordTransportError("Discord request failed") from exc
+    finally:
+        connection.close()
 
 
 def post_discord_request(
-    url: str, payload: bytes, timeout_seconds: float
+    url: str,
+    payload: bytes,
+    timeout_seconds: float,
+    *,
+    approved_address: str | None = None,
 ) -> DiscordResponse:
+    if approved_address is not None:
+        return _post_pinned_discord_request(
+            url, payload, timeout_seconds, approved_address
+        )
     request = urllib.request.Request(
         url,
         data=payload,
@@ -203,8 +266,10 @@ def post_discord_request(
 def request_discord(
     url: str, payload: bytes, timeout_seconds: float
 ) -> DiscordResponse:
-    _ensure_public_discord_host(url)
-    return post_discord_request(url, payload, timeout_seconds)
+    approved_address = _verified_discord_address(url)
+    return post_discord_request(
+        url, payload, timeout_seconds, approved_address=approved_address
+    )
 
 
 class DiscordDelivery:
@@ -259,6 +324,17 @@ class DiscordDelivery:
                 chunk_hash,
             ):
                 continue
+            if self._repository.delivery_chunk_indeterminate(
+                self._report_key,
+                report_hash,
+                self._destination_id,
+                index,
+                chunk_hash,
+            ):
+                raise DeliveryError(
+                    "Discord delivery state is indeterminate; refusing to "
+                    "duplicate chunk"
+                )
             self._send_chunk(
                 report_hash=report_hash,
                 chunk_index=index,
@@ -290,13 +366,13 @@ class DiscordDelivery:
                     chunk_index,
                     chunk_count,
                     chunk_hash,
-                    status="retryable_failure",
+                    status="failed",
                     http_class="transport",
-                    idempotency_state="pending",
+                    idempotency_state="indeterminate",
                 )
-                if attempt < self._retries:
-                    continue
-                raise DeliveryError("Discord delivery transport failure") from None
+                raise DeliveryError(
+                    "Discord delivery state is indeterminate; refusing to retry chunk"
+                ) from None
 
             http_class = f"{status // 100}xx" if 100 <= status <= 599 else "invalid"
             if 200 <= status < 300:

@@ -76,7 +76,7 @@ def _assert_legacy_database_migrates_to_latest(path: Path) -> None:
     repository = SQLiteRepository(path)
 
     connection = sqlite3.connect(path)
-    assert connection.execute("PRAGMA user_version").fetchone() == (4,)
+    assert connection.execute("PRAGMA user_version").fetchone() == (5,)
     sources_hash_column = next(
         row
         for row in connection.execute("PRAGMA table_info(source_runs)")
