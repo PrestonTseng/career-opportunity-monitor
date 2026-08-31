@@ -6,6 +6,10 @@ from typing import Protocol, runtime_checkable
 from .repository import SourceObservation
 
 
+class SourceError(RuntimeError):
+    """A configured public source returned unavailable or invalid data."""
+
+
 @dataclass(frozen=True)
 class SourceFetchResult:
     observations: tuple[SourceObservation, ...]

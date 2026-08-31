@@ -1,64 +1,244 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
+import socket
+import ssl
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from html import unescape
-from typing import Protocol, cast
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from http.client import HTTPException, HTTPMessage, HTTPSConnection
+from typing import IO, Protocol, cast
+from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.request import HTTPRedirectHandler, Request
 
 from .models import CanonicalJob, JobLocation
 from .repository import SourceObservation
-from .source import SourceFetchResult
+from .source import SourceError, SourceFetchResult
 
-_CXS_BASE = (
-    "https://nvidia.wd5.myworkdayjobs.com/wday/cxs/nvidia/NVIDIAExternalCareerSite"
-)
-_LIST_URL = f"{_CXS_BASE}/jobs"
-_OFFICIAL_URL_PREFIX = (
-    "https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite/job/"
-)
 _TAGS = re.compile(r"<[^>]*>")
 _SPACE = re.compile(r"\s+")
-
-
-class SourceError(RuntimeError):
-    """A public source returned unavailable or invalid data."""
 
 
 class Transport(Protocol):
     def request(self, url: str, body: bytes | None) -> bytes: ...
 
 
+class _Response(Protocol):
+    status: int
+
+    def getheader(self, name: str) -> str | None: ...
+
+    def read(self, amount: int) -> bytes: ...
+
+
+class _Connection(Protocol):
+    def request(
+        self, method: str, path: str, body: bytes | None, headers: dict[str, str]
+    ) -> None: ...
+
+    def getresponse(self) -> _Response: ...
+
+    def close(self) -> None: ...
+
+
+ConnectionFactory = Callable[[str, str, float], _Connection]
+
+
+class ApprovedOriginRedirectHandler(HTTPRedirectHandler):
+    def __init__(self, approved_origin: str) -> None:
+        self._approved_origin = approved_origin
+
+    def redirect_request(
+        self,
+        req: Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: HTTPMessage,
+        newurl: str,
+    ) -> Request | None:
+        validate_approved_url(newurl, self._approved_origin)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 class UrlLibTransport:
-    def __init__(self, *, timeout_seconds: float, response_limit_bytes: int) -> None:
+    def __init__(
+        self,
+        *,
+        approved_origin: str,
+        timeout_seconds: float,
+        response_limit_bytes: int,
+        connection_factory: ConnectionFactory | None = None,
+    ) -> None:
+        self._approved_origin = approved_origin
         self._timeout_seconds = timeout_seconds
         self._response_limit_bytes = response_limit_bytes
+        self._connection_factory = connection_factory or _pinned_https_connection
 
     def request(self, url: str, body: bytes | None) -> bytes:
-        request = Request(
-            url,
-            data=body,
-            headers={"Accept": "application/json", "Content-Type": "application/json"},
-            method="POST" if body is not None else "GET",
-        )
-        try:
-            with urlopen(request, timeout=self._timeout_seconds) as response:  # noqa: S310
+        current_url = url
+        current_body = body
+        for redirect_count in range(6):
+            addresses = validate_approved_url(current_url, self._approved_origin)
+            parsed = urlsplit(current_url)
+            assert parsed.hostname is not None
+            path = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+            connection = self._connection_factory(
+                parsed.hostname, addresses[0], self._timeout_seconds
+            )
+            try:
+                connection.request(
+                    "POST" if current_body is not None else "GET",
+                    path,
+                    current_body,
+                    {"Accept": "application/json", "Content-Type": "application/json"},
+                )
+                response = connection.getresponse()
+                if response.status in (301, 302, 303, 307, 308):
+                    location = response.getheader("Location")
+                    if location is None or redirect_count == 5:
+                        raise SourceError("source returned an invalid redirect")
+                    try:
+                        current_url = urljoin(current_url, location)
+                        _assert_approved_origin(current_url, self._approved_origin)
+                    except ValueError as exc:
+                        raise SourceError(
+                            "source returned an invalid redirect"
+                        ) from exc
+                    except SourceError as exc:
+                        raise SourceError(
+                            "source returned an invalid redirect"
+                        ) from exc
+                    if response.status in (301, 302, 303):
+                        current_body = None
+                    continue
+                if response.status >= 400:
+                    raise SourceError(f"request failed with HTTP {response.status}")
                 payload = response.read(self._response_limit_bytes + 1)
-        except (HTTPError, URLError, TimeoutError) as exc:
-            raise SourceError(f"request failed: {exc}") from exc
-        if len(payload) > self._response_limit_bytes:
-            raise SourceError("response exceeded configured byte limit")
-        return payload
+            except HTTPException as exc:
+                raise SourceError(
+                    "request failed due to invalid HTTP response"
+                ) from exc
+            except (OSError, TimeoutError) as exc:
+                raise SourceError(f"request failed: {exc}") from exc
+            finally:
+                connection.close()
+            if len(payload) > self._response_limit_bytes:
+                raise SourceError("response exceeded configured byte limit")
+            return payload
+        raise SourceError("source returned too many redirects")
+
+
+class _PinnedHTTPSConnection(HTTPSConnection):
+    def __init__(self, host: str, address: str, timeout: float) -> None:
+        super().__init__(host, 443, timeout=timeout)
+        self._approved_address = address
+        self._ssl_context = ssl.create_default_context()
+
+    def connect(self) -> None:
+        raw_socket = socket.create_connection(
+            (self._approved_address, 443), self.timeout
+        )
+        self.sock = self._ssl_context.wrap_socket(raw_socket, server_hostname=self.host)
+
+
+def _pinned_https_connection(
+    host: str, address: str, timeout: float
+) -> _PinnedHTTPSConnection:
+    return _PinnedHTTPSConnection(host, address, timeout)
+
+
+def _origin(value: str) -> str:
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+        or parsed.netloc != parsed.hostname
+    ):
+        return ""
+    return f"https://{parsed.hostname}"
+
+
+def _assert_approved_origin(url: str, approved_origin: str) -> str:
+    try:
+        parsed = urlsplit(url)
+    except ValueError as exc:
+        raise SourceError(
+            "request URL is outside the configured approved origin"
+        ) from exc
+    if (
+        _origin(approved_origin) != approved_origin
+        or parsed.scheme != "https"
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+        or f"{parsed.scheme}://{parsed.netloc}" != approved_origin
+    ):
+        raise SourceError("request URL is outside the configured approved origin")
+    assert parsed.hostname is not None
+    return parsed.hostname
+
+
+def validate_approved_url(url: str, approved_origin: str) -> tuple[str, ...]:
+    hostname = _assert_approved_origin(url, approved_origin)
+    try:
+        answers = socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise SourceError("approved source host could not be resolved safely") from exc
+    addresses = {str(answer[4][0]) for answer in answers}
+    if not addresses or any(
+        not ipaddress.ip_address(address).is_global for address in addresses
+    ):
+        raise SourceError("approved source host resolved to a non-public address")
+    return tuple(sorted(addresses))
+
+
+def _assert_official_url(url: str, approved_origin: str, site: str) -> None:
+    try:
+        parsed = urlsplit(url)
+    except ValueError as exc:
+        raise SourceError(
+            "detail official URL is outside the configured Workday origin"
+        ) from exc
+    if (
+        parsed.scheme != "https"
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or f"{parsed.scheme}://{parsed.netloc}" != approved_origin
+        or not parsed.path.startswith(f"/{site}/job/")
+    ):
+        raise SourceError(
+            "detail official URL is outside the configured Workday origin"
+        )
 
 
 @dataclass(frozen=True)
-class NvidiaWorkdaySource:
-    """Read-only adapter for NVIDIA's unauthenticated public Workday CXS API."""
+class WorkdaySource:
+    """Read-only adapter for one explicitly approved Workday CXS instance."""
+
+    name: str
+    origin: str
+    tenant: str
+    site: str
+    company: str
+    search_text: str
 
     transport: Transport | None = None
     page_size: int = 20
@@ -70,8 +250,6 @@ class NvidiaWorkdaySource:
     rate_limit_seconds: float = 0.0
     sleep: Callable[[float], None] = time.sleep
 
-    name: str = "nvidia-workday"
-
     def __post_init__(self) -> None:
         if (
             self.page_size < 1
@@ -82,13 +260,18 @@ class NvidiaWorkdaySource:
             or self.retries < 0
             or self.rate_limit_seconds < 0
         ):
-            raise ValueError("NVIDIA source limits must be positive and bounded")
+            raise ValueError("Workday source limits must be positive and bounded")
+        if _origin(self.origin) != self.origin:
+            raise ValueError("Workday source origin must be canonical HTTPS")
 
     def fetch(self) -> SourceFetchResult:
         transport = self.transport or UrlLibTransport(
+            approved_origin=self.origin,
             timeout_seconds=self.timeout_seconds,
             response_limit_bytes=self.response_limit_bytes,
         )
+        cxs_base = f"{self.origin}/wday/cxs/{self.tenant}/{self.site}"
+        list_url = f"{cxs_base}/jobs"
         observations: list[SourceObservation] = []
         failures: list[str] = []
         seen_ids: set[str] = set()
@@ -117,11 +300,15 @@ class NvidiaWorkdaySource:
         for page in range(self.max_pages):
             offset = page * self.page_size
             body = json.dumps(
-                {"limit": self.page_size, "offset": offset, "searchText": "Taiwan"},
+                {
+                    "limit": self.page_size,
+                    "offset": offset,
+                    "searchText": self.search_text,
+                },
                 separators=(",", ":"),
             ).encode()
             try:
-                page_data = _json_object(request(_LIST_URL, body), "list response")
+                page_data = _json_object(request(list_url, body), "list response")
                 raw_total = page_data.get("total")
                 raw_postings_value = page_data.get("jobPostings")
                 if not isinstance(raw_total, int) or raw_total < 0:
@@ -143,9 +330,15 @@ class NvidiaWorkdaySource:
             for item in raw_postings:
                 try:
                     external_path = _external_path(item)
-                    detail_payload = request(f"{_CXS_BASE}{external_path}", None)
+                    detail_payload = request(f"{cxs_base}{external_path}", None)
                     detail = _json_object(detail_payload, "detail")
-                    observation = _observation(detail)
+                    observation = _observation(
+                        detail,
+                        source_name=self.name,
+                        company=self.company,
+                        origin=self.origin,
+                        site=self.site,
+                    )
                     source_id = observation.job.source_job_id
                     if source_id in seen_ids:
                         failures.append(f"duplicate requisition {source_id}")
@@ -200,12 +393,34 @@ def _external_path(item: object) -> str:
     if not isinstance(item, dict):
         raise SourceError("list posting must be an object")
     value = _object_dict(cast(object, item)).get("externalPath")
-    if not isinstance(value, str) or not value.startswith("/job/") or "?" in value:
+    if not isinstance(value, str):
+        raise SourceError("list posting has unsafe externalPath")
+    try:
+        parsed = urlsplit(value)
+    except ValueError as exc:
+        raise SourceError("list posting has unsafe externalPath") from exc
+    if (
+        parsed.scheme
+        or parsed.netloc
+        or parsed.query
+        or parsed.fragment
+        or not parsed.path.startswith("/job/")
+        or "\\" in value
+        or "%" in value
+        or any(part in ("", ".", "..") for part in parsed.path.split("/")[2:])
+    ):
         raise SourceError("list posting has unsafe externalPath")
     return value
 
 
-def _observation(detail: dict[str, object]) -> SourceObservation:
+def _observation(
+    detail: dict[str, object],
+    *,
+    source_name: str,
+    company: str,
+    origin: str,
+    site: str,
+) -> SourceObservation:
     info_value = detail.get("jobPostingInfo")
     if not isinstance(info_value, dict):
         raise SourceError("detail has no jobPostingInfo object")
@@ -217,8 +432,7 @@ def _observation(detail: dict[str, object]) -> SourceObservation:
         isinstance(value, str) and value.strip() for value in (requisition, title, url)
     ):
         raise SourceError("detail requires requisition, title, and official URL")
-    if not str(url).startswith(_OFFICIAL_URL_PREFIX):
-        raise SourceError("detail official URL is outside NVIDIA Workday")
+    _assert_official_url(str(url), origin, site)
     location = _location(info)
     description = info.get("jobDescription")
     if description is not None and not isinstance(description, str):
@@ -231,10 +445,10 @@ def _observation(detail: dict[str, object]) -> SourceObservation:
     return SourceObservation(
         job=CanonicalJob(
             schema_version=1,
-            source_name="nvidia-workday",
+            source_name=source_name,
             source_job_id=str(requisition),
             source_url=str(url),
-            company="NVIDIA",
+            company=company,
             title=str(title),
             description_text=(
                 None if description is None else _html_to_text(description)

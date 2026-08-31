@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 
@@ -249,6 +249,39 @@ def test_delivery_failure_persists_and_retries_golden_report(tmp_path: Path) -> 
     assert output.read_bytes() == golden
 
 
+def test_initial_delivery_attempts_later_destination_after_first_failure() -> None:
+    repository = FakeRepository(reports=[], feedback=[])
+    later = RecordingDelivery()
+
+    with pytest.raises(DeliveryError, match="delivery failed"):
+        DailyReportService(repository).create_and_deliver(
+            report_date="2026-08-27",
+            jobs=(_report_job(),),
+            source_health=(),
+            display_limit=5,
+            created_at="2026-08-27T00:00:00Z",
+            deliveries=(FailingDelivery(), later),
+        )
+
+    assert later.contents == [_golden("delivery-failure-report.md")]
+
+
+def test_retry_delivery_attempts_later_destination_after_first_failure() -> None:
+    golden = _golden("delivery-failure-report.md")
+    repository = FakeRepository(
+        reports=[("daily:2026-08-27", golden, "2026-08-27T00:00:00Z")],
+        feedback=[],
+    )
+    later = RecordingDelivery()
+
+    with pytest.raises(DeliveryError, match="delivery failed"):
+        DailyReportService(repository).retry_delivery(
+            "daily:2026-08-27", (FailingDelivery(), later)
+        )
+
+    assert later.contents == [golden]
+
+
 def test_file_and_console_delivery_write_the_same_bytes(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -303,6 +336,14 @@ def test_feedback_uses_the_canonical_job_identity() -> None:
 class FailingDelivery:
     def deliver(self, content: bytes) -> None:
         raise OSError("disk is full")
+
+
+@dataclass
+class RecordingDelivery:
+    contents: list[bytes] = field(default_factory=list[bytes])
+
+    def deliver(self, content: bytes) -> None:
+        self.contents.append(content)
 
 
 def _golden(name: str) -> bytes:

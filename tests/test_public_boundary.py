@@ -29,6 +29,12 @@ def test_ignore_files_exclude_private_runtime_paths() -> None:
 def test_environment_example_disables_optional_llm_and_has_no_key() -> None:
     environment = lines(ROOT / ".env.example")
 
+    assert "CAREER_MONITOR_MODE=production" in environment
+    assert any(value.startswith("CAREER_MONITOR_RESUME_FILE=") for value in environment)
+    assert any(value.startswith("CAREER_MONITOR_CONFIG_DIR=") for value in environment)
+    assert any(
+        value.startswith("CAREER_MONITOR_DISCORD_SECRET_FILE=") for value in environment
+    )
     assert "CAREER_MONITOR_LLM_MODE=off" in environment
     assert any(
         value.startswith("CAREER_MONITOR_LLM_SECRET_FILE=") for value in environment

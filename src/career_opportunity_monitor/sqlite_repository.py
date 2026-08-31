@@ -139,6 +139,114 @@ CREATE TABLE writer_lock (
 ) STRICT;
 """
 
+_MIGRATION_2 = """
+CREATE TABLE sources_snapshots (
+    sources_hash TEXT PRIMARY KEY,
+    snapshot_bytes BLOB NOT NULL,
+    created_at TEXT NOT NULL
+) STRICT;
+"""
+
+_LEGACY_SOURCES_SNAPSHOT = (
+    b'{"schema_version":0,"status":"unavailable","reason":'
+    b'"source configuration predates durable correlation"}'
+)
+_LEGACY_SOURCES_HASH = (
+    "aa374f95cb38ced06ca7350ec2bf7c123d74a3d335f1e92c182bf99f67e2d559"
+)
+
+_MIGRATION_3 = f"""
+INSERT INTO sources_snapshots(sources_hash, snapshot_bytes, created_at)
+VALUES (
+    '{_LEGACY_SOURCES_HASH}',
+    X'{_LEGACY_SOURCES_SNAPSHOT.hex()}',
+    strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+)
+ON CONFLICT(sources_hash) DO NOTHING;
+
+CREATE TABLE source_runs_v3 (
+    id INTEGER PRIMARY KEY,
+    run_key TEXT NOT NULL UNIQUE,
+    source_name TEXT NOT NULL,
+    sources_hash TEXT NOT NULL REFERENCES sources_snapshots(sources_hash),
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+    receipt_json BLOB,
+    error TEXT
+) STRICT;
+
+INSERT INTO source_runs_v3(
+    id, run_key, source_name, sources_hash, started_at, finished_at,
+    status, receipt_json, error
+)
+SELECT
+    id, run_key, source_name, '{_LEGACY_SOURCES_HASH}', started_at, finished_at,
+    status, receipt_json, error
+FROM source_runs;
+
+DROP TABLE source_runs;
+ALTER TABLE source_runs_v3 RENAME TO source_runs;
+"""
+
+_MIGRATION_4 = """
+CREATE TABLE delivery_attempts (
+    id INTEGER PRIMARY KEY,
+    report_id INTEGER NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
+    report_key TEXT NOT NULL REFERENCES reports(report_key) ON DELETE CASCADE,
+    report_hash TEXT NOT NULL,
+    destination_id TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
+    chunk_count INTEGER NOT NULL CHECK (chunk_count > 0 AND chunk_index < chunk_count),
+    chunk_hash TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN (
+        'acknowledged', 'failed', 'rate_limited', 'retryable_failure'
+    )),
+    attempted_at TEXT NOT NULL,
+    http_class TEXT NOT NULL,
+    idempotency_state TEXT NOT NULL CHECK (
+        idempotency_state IN ('pending', 'acknowledged')
+    )
+) STRICT;
+CREATE INDEX delivery_attempt_ack_lookup ON delivery_attempts(
+    report_key, report_hash, destination_id, chunk_index, chunk_hash, status
+);
+"""
+
+_MIGRATION_5 = """
+ALTER TABLE delivery_attempts RENAME TO delivery_attempts_v4;
+CREATE TABLE delivery_attempts (
+    id INTEGER PRIMARY KEY,
+    report_id INTEGER NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
+    report_key TEXT NOT NULL REFERENCES reports(report_key) ON DELETE CASCADE,
+    report_hash TEXT NOT NULL,
+    destination_id TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
+    chunk_count INTEGER NOT NULL CHECK (chunk_count > 0 AND chunk_index < chunk_count),
+    chunk_hash TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN (
+        'acknowledged', 'failed', 'rate_limited', 'retryable_failure'
+    )),
+    attempted_at TEXT NOT NULL,
+    http_class TEXT NOT NULL,
+    idempotency_state TEXT NOT NULL CHECK (
+        idempotency_state IN ('pending', 'acknowledged', 'indeterminate')
+    )
+) STRICT;
+INSERT INTO delivery_attempts(
+    id, report_id, report_key, report_hash, destination_id, chunk_index,
+    chunk_count, chunk_hash, status, attempted_at, http_class, idempotency_state
+)
+SELECT
+    id, report_id, report_key, report_hash, destination_id, chunk_index,
+    chunk_count, chunk_hash, status, attempted_at, http_class, idempotency_state
+FROM delivery_attempts_v4;
+DROP TABLE delivery_attempts_v4;
+CREATE INDEX delivery_attempt_ack_lookup ON delivery_attempts(
+    report_key, report_hash, destination_id, chunk_index, chunk_hash, status
+);
+"""
+
 
 class SQLiteRepository:
     """SQLite-backed durable history for a single career monitor installation."""
@@ -176,6 +284,57 @@ class SQLiteRepository:
                 + "PRAGMA user_version = 1;\n"
                 + "COMMIT;"
             )
+            version = 1
+        if version == 1:
+            self._connection.executescript(
+                "BEGIN IMMEDIATE;\n"
+                + _MIGRATION_2
+                + "\n"
+                + "INSERT INTO schema_migrations(version, applied_at) "
+                + "VALUES (2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));\n"
+                + "PRAGMA user_version = 2;\n"
+                + "COMMIT;"
+            )
+            version = 2
+        if version == 2:
+            self._connection.executescript(
+                "PRAGMA foreign_keys = OFF;\n"
+                + "BEGIN IMMEDIATE;\n"
+                + _MIGRATION_3
+                + "\n"
+                + "INSERT INTO schema_migrations(version, applied_at) "
+                + "VALUES (3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));\n"
+                + "PRAGMA user_version = 3;\n"
+                + "COMMIT;\n"
+                + "PRAGMA foreign_keys = ON;"
+            )
+            version = 3
+        if version == 3:
+            self._connection.executescript(
+                "BEGIN IMMEDIATE;\n"
+                + _MIGRATION_4
+                + "\nINSERT INTO schema_migrations(version, applied_at) "
+                + "VALUES (4, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));\n"
+                + "PRAGMA user_version = 4;\nCOMMIT;"
+            )
+            version = 4
+        if version == 4:
+            self._connection.executescript(
+                "BEGIN IMMEDIATE;\n"
+                + _MIGRATION_5
+                + "\nINSERT INTO schema_migrations(version, applied_at) "
+                + "VALUES (5, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));\n"
+                + "PRAGMA user_version = 5;\nCOMMIT;"
+            )
+            version = 5
+        if version != 5:
+            raise RepositoryError(f"unsupported SQLite schema version: {version}")
+        legacy = self._connection.execute(
+            "SELECT snapshot_bytes FROM sources_snapshots WHERE sources_hash = ?",
+            (_LEGACY_SOURCES_HASH,),
+        ).fetchone()
+        if legacy is None or bytes(legacy[0]) != _LEGACY_SOURCES_SNAPSHOT:
+            raise RepositoryError("legacy sources snapshot content is invalid")
 
     @property
     def foreign_keys_enabled(self) -> bool:
@@ -268,22 +427,31 @@ class SQLiteRepository:
             os.close(lock_fd)
 
     def start_source_run(
-        self, source_name: str, started_at: str, *, run_id: str
+        self,
+        source_name: str,
+        started_at: str,
+        *,
+        run_id: str,
+        sources_hash: str = _LEGACY_SOURCES_HASH,
     ) -> int:
-        if not source_name or not started_at or not run_id:
-            raise RepositoryError("source name, start time, and run ID are required")
+        if not source_name or not started_at or not run_id or not sources_hash:
+            raise RepositoryError(
+                "source name, start time, run ID, and sources hash are required"
+            )
         self._connection.execute(
-            "INSERT INTO source_runs(run_key, source_name, started_at, status) "
-            "VALUES (?, ?, ?, 'running') "
+            "INSERT INTO source_runs"
+            "(run_key, source_name, sources_hash, started_at, status) "
+            "VALUES (?, ?, ?, ?, 'running') "
             "ON CONFLICT(run_key) DO NOTHING",
-            (run_id, source_name, started_at),
+            (run_id, source_name, sources_hash, started_at),
         )
         row = self._connection.execute(
-            "SELECT id, source_name, started_at FROM source_runs WHERE run_key = ?",
+            "SELECT id, source_name, started_at, sources_hash "
+            "FROM source_runs WHERE run_key = ?",
             (run_id,),
         ).fetchone()
         assert row is not None
-        if row[1:] != (source_name, started_at):
+        if row[1:] != (source_name, started_at, sources_hash):
             raise RepositoryError("run ID already identifies a different source run")
         return int(row[0])
 
@@ -526,7 +694,7 @@ class SQLiteRepository:
     def get_source_run(self, source_run_id: int) -> StoredSourceRun:
         row = self._connection.execute(
             "SELECT id, run_key, source_name, started_at, finished_at, status, "
-            "receipt_json, error FROM source_runs WHERE id = ?",
+            "receipt_json, error, sources_hash FROM source_runs WHERE id = ?",
             (source_run_id,),
         ).fetchone()
         if row is None:
@@ -540,6 +708,7 @@ class SQLiteRepository:
             status=cast(str, row[5]),  # type: ignore[arg-type]
             receipt=None if row[6] is None else bytes(row[6]),
             error=None if row[7] is None else str(row[7]),
+            sources_hash=str(row[8]),
         )
 
     def get_job(self, source_name: str, source_job_id: str) -> StoredJob:
@@ -589,6 +758,17 @@ class SQLiteRepository:
             "strategy_snapshots",
             "strategy_hash",
             strategy_hash,
+            snapshot_bytes,
+            created_at,
+        )
+
+    def store_sources_snapshot(
+        self, sources_hash: str, snapshot_bytes: bytes, created_at: str
+    ) -> None:
+        self._store_snapshot(
+            "sources_snapshots",
+            "sources_hash",
+            sources_hash,
             snapshot_bytes,
             created_at,
         )
@@ -673,14 +853,22 @@ class SQLiteRepository:
             "llm_assessments",
             "profile_snapshots",
             "reports",
+            "sources_snapshots",
             "strategy_snapshots",
         )
-        return {
+        counts = {
             table: int(
                 self._connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
             )
             for table in tables
         }
+        counts["sources_snapshots"] -= int(
+            self._connection.execute(
+                "SELECT count(*) FROM sources_snapshots WHERE sources_hash = ?",
+                (_LEGACY_SOURCES_HASH,),
+            ).fetchone()[0]
+        )
+        return counts
 
     def store_report(self, key: str, content: bytes, created_at: str) -> int:
         return self._store_keyed_artifact(
@@ -699,6 +887,101 @@ class SQLiteRepository:
         if row is None:
             raise RepositoryError("report does not exist")
         return bytes(row[0])
+
+    def list_reports(
+        self, prefix: str, start: str, end: str
+    ) -> tuple[tuple[str, bytes], ...]:
+        if not prefix or not start or not end or start >= end:
+            raise RepositoryError("report range must be valid")
+        rows = self._connection.execute(
+            "SELECT report_key, report_bytes FROM reports "
+            "WHERE report_key >= ? AND report_key < ? ORDER BY report_key",
+            (f"{prefix}{start}", f"{prefix}{end}"),
+        )
+        return tuple((str(key), bytes(content)) for key, content in rows)
+
+    def delivery_chunk_acknowledged(
+        self,
+        report_key: str,
+        report_hash: str,
+        destination_id: str,
+        chunk_index: int,
+        chunk_hash: str,
+    ) -> bool:
+        return (
+            self._delivery_chunk_state(
+                report_key,
+                report_hash,
+                destination_id,
+                chunk_index,
+                chunk_hash,
+            )
+            == "acknowledged"
+        )
+
+    def delivery_chunk_indeterminate(
+        self,
+        report_key: str,
+        report_hash: str,
+        destination_id: str,
+        chunk_index: int,
+        chunk_hash: str,
+    ) -> bool:
+        return (
+            self._delivery_chunk_state(
+                report_key,
+                report_hash,
+                destination_id,
+                chunk_index,
+                chunk_hash,
+            )
+            == "indeterminate"
+        )
+
+    def _delivery_chunk_state(
+        self,
+        report_key: str,
+        report_hash: str,
+        destination_id: str,
+        chunk_index: int,
+        chunk_hash: str,
+    ) -> str | None:
+        row = self._connection.execute(
+            "SELECT idempotency_state FROM delivery_attempts WHERE report_key = ? "
+            "AND report_hash = ? AND destination_id = ? AND chunk_index = ? "
+            "AND chunk_hash = ? ORDER BY id DESC LIMIT 1",
+            (report_key, report_hash, destination_id, chunk_index, chunk_hash),
+        ).fetchone()
+        return None if row is None else str(row[0])
+
+    def record_delivery_attempt(self, **values: object) -> None:
+        report_key = values.get("report_key")
+        report = self._connection.execute(
+            "SELECT id FROM reports WHERE report_key = ?", (report_key,)
+        ).fetchone()
+        if report is None:
+            raise RepositoryError("invalid delivery attempt evidence")
+        columns = (
+            "report_id",
+            "report_key",
+            "report_hash",
+            "destination_id",
+            "chunk_index",
+            "chunk_count",
+            "chunk_hash",
+            "status",
+            "attempted_at",
+            "http_class",
+            "idempotency_state",
+        )
+        try:
+            self._connection.execute(
+                "INSERT INTO delivery_attempts(" + ",".join(columns) + ") "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (int(report[0]), *(values[column] for column in columns[1:])),
+            )
+        except (KeyError, sqlite3.IntegrityError) as exc:
+            raise RepositoryError("invalid delivery attempt evidence") from exc
 
     def store_feedback(
         self, job_id: int, key: str, content: bytes, created_at: str

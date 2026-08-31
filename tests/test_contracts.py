@@ -21,11 +21,20 @@ def test_source_package_exposes_version() -> None:
     assert career_opportunity_monitor.__version__ == "0.1.0"
 
 
+def test_provider_specific_workday_adapter_is_not_production_code() -> None:
+    assert not (ROOT / "src/career_opportunity_monitor/nvidia_workday.py").exists()
+    operations = (ROOT / "docs/operations.md").read_text(encoding="utf-8")
+    security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
+    assert "NVIDIA source" not in operations
+    assert "NVIDIA Workday source" not in security
+
+
 @pytest.mark.parametrize(
     ("schema_name", "example_name"),
     [
         ("resume-facts.schema.yaml", "resume_facts.yaml"),
         ("strategy.schema.yaml", "strategy/v1/strategy.yaml"),
+        ("sources.schema.yaml", "strategy/v1/sources.yaml"),
         ("job.schema.yaml", "job.yaml"),
     ],
 )

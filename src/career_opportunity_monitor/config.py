@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import os
 import re
 import stat
@@ -11,6 +12,8 @@ from decimal import Decimal
 from importlib.resources import files
 from pathlib import Path
 from typing import cast
+from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 from jsonschema import Draft202012Validator
@@ -18,14 +21,21 @@ from jsonschema.exceptions import ValidationError
 
 from .models import (
     CATEGORIES,
+    CadenceSchedule,
     Category,
     CompiledProfile,
+    DestinationConfiguration,
     FactKind,
     FactStatus,
     LoadedConfiguration,
     Market,
+    ReportCadence,
     ResumeFact,
+    ScheduleConfiguration,
+    SourceAdapter,
+    SourceConfiguration,
     Strategy,
+    WorkdayOptions,
 )
 
 
@@ -252,6 +262,149 @@ def _compile_strategy(value: object) -> Strategy:
     )
 
 
+def _approved_origin(value: str) -> str:
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise ConfigError("source origin is ambiguous") from exc
+    hostname = parsed.hostname
+    if (
+        parsed.scheme != "https"
+        or hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+        or parsed.netloc != hostname
+        or hostname != hostname.lower()
+        or hostname.endswith(".")
+        or "%" in hostname
+    ):
+        raise ConfigError("source origin must be an unambiguous HTTPS origin")
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        raise ConfigError(
+            "source origin must not target localhost or a private address"
+        )
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        labels = hostname.split(".")
+        if len(labels) < 2 or any(
+            not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+            for label in labels
+        ):
+            raise ConfigError("source origin has an invalid host") from None
+    else:
+        if not address.is_global:
+            raise ConfigError(
+                "source origin must not target localhost or a private address"
+            )
+    return f"https://{hostname}"
+
+
+def _compile_sources(value: object) -> tuple[SourceConfiguration, ...]:
+    root = cast(dict[str, object], value)
+    raw_sources = cast(list[object], root["sources"])
+    sources: list[SourceConfiguration] = []
+    for raw_source in raw_sources:
+        source = cast(dict[str, object], raw_source)
+        raw_options = cast(dict[str, object], source["options"])
+        sources.append(
+            SourceConfiguration(
+                id=cast(str, source["id"]),
+                enabled=cast(bool, source["enabled"]),
+                adapter=cast(SourceAdapter, source["adapter"]),
+                origin=_approved_origin(cast(str, source["origin"])),
+                tenant=cast(str, source["tenant"]),
+                site=cast(str, source["site"]),
+                company=cast(str, source["company"]),
+                search_text=cast(str, source["search_text"]),
+                options=WorkdayOptions(
+                    page_size=cast(int, raw_options["page_size"]),
+                    max_pages=cast(int, raw_options["max_pages"]),
+                    max_requests=cast(int, raw_options["max_requests"]),
+                    timeout_seconds=float(
+                        cast(int | float, raw_options["timeout_seconds"])
+                    ),
+                    response_limit_bytes=cast(int, raw_options["response_limit_bytes"]),
+                    retries=cast(int, raw_options["retries"]),
+                    rate_limit_seconds=float(
+                        cast(int | float, raw_options["rate_limit_seconds"])
+                    ),
+                ),
+            )
+        )
+    ids = [source.id for source in sources]
+    if len(ids) != len(set(ids)):
+        raise ConfigError("duplicate source id")
+    return tuple(sources)
+
+
+def _compile_destinations(value: object) -> tuple[DestinationConfiguration, ...]:
+    root = cast(dict[str, object], value)
+    raw_destinations = cast(list[object], root["destinations"])
+    destinations = tuple(
+        DestinationConfiguration(
+            id=cast(str, destination["id"]),
+            enabled=cast(bool, destination["enabled"]),
+            type="discord",
+            report_cadences=tuple(
+                cast(list[ReportCadence], destination["report_cadences"])
+            ),
+            webhook_url_file=Path(cast(str, destination["webhook_url_file"])),
+        )
+        for raw_destination in raw_destinations
+        for destination in (cast(dict[str, object], raw_destination),)
+    )
+    ids = [destination.id for destination in destinations]
+    if len(ids) != len(set(ids)):
+        raise ConfigError("duplicate destination id")
+    if any(
+        not destination.webhook_url_file.is_absolute() for destination in destinations
+    ):
+        raise ConfigError("destination webhook URL file must be absolute")
+    return destinations
+
+
+def _compile_schedule(value: object) -> ScheduleConfiguration:
+    root = cast(dict[str, object], value)
+    timezone_name = cast(str, root["timezone"])
+    try:
+        ZoneInfo(timezone_name)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ConfigError("schedule timezone must be a valid IANA timezone") from exc
+
+    daily_raw = cast(dict[str, object], root["daily"])
+    weekly_raw = cast(dict[str, object], root["weekly"])
+    daily = CadenceSchedule(
+        enabled=cast(bool, daily_raw["enabled"]),
+        cron=cast(str, daily_raw["cron"]),
+    )
+    weekly = CadenceSchedule(
+        enabled=cast(bool, weekly_raw["enabled"]),
+        cron=cast(str, weekly_raw["cron"]),
+    )
+    daily_match = re.fullmatch(r"(\d|[1-5]\d) ([01]?\d|2[0-3]) \* \* \*", daily.cron)
+    weekly_match = re.fullmatch(
+        r"(\d|[1-5]\d) ([01]?\d|2[0-3]) \* \* ([0-6])", weekly.cron
+    )
+    if daily_match is None:
+        raise ConfigError("daily cron must use 'minute hour * * *'")
+    if weekly_match is None:
+        raise ConfigError("weekly cron must use 'minute hour * * weekday'")
+    if (
+        daily.enabled
+        and weekly.enabled
+        and tuple(map(int, daily_match.groups()[:2]))
+        == tuple(map(int, weekly_match.groups()[:2]))
+    ):
+        raise ConfigError("daily and weekly schedules overlap")
+    return ScheduleConfiguration(timezone=timezone_name, daily=daily, weekly=weekly)
+
+
 def _assert_unchanged(path: Path, expected: _Fingerprint) -> None:
     try:
         current = _fingerprint(path.lstat())
@@ -276,17 +429,34 @@ def load_configuration(
         raise ConfigError("unsafe strategy directory shape")
 
     entries_before = tuple(sorted(path.name for path in strategy_directory.iterdir()))
-    if entries_before != ("strategy.yaml",):
-        raise ConfigError("strategy directory must contain exactly strategy.yaml")
+    if entries_before != (
+        "destinations.yaml",
+        "schedule.yaml",
+        "sources.yaml",
+        "strategy.yaml",
+    ):
+        raise ConfigError(
+            "configuration directory must contain exactly destinations.yaml, "
+            "schedule.yaml, sources.yaml, and strategy.yaml"
+        )
 
     resume_raw, resume_fingerprint = _read_stable_regular(resume_path)
     strategy_path = strategy_directory / "strategy.yaml"
     strategy_raw, strategy_fingerprint = _read_stable_regular(strategy_path)
+    sources_path = strategy_directory / "sources.yaml"
+    sources_raw, sources_fingerprint = _read_stable_regular(sources_path)
+    destinations_path = strategy_directory / "destinations.yaml"
+    destinations_raw, destinations_fingerprint = _read_stable_regular(destinations_path)
+    schedule_path = strategy_directory / "schedule.yaml"
+    schedule_raw, schedule_fingerprint = _read_stable_regular(schedule_path)
     if after_read is not None:
         after_read()
 
     _assert_unchanged(resume_path, resume_fingerprint)
     _assert_unchanged(strategy_path, strategy_fingerprint)
+    _assert_unchanged(sources_path, sources_fingerprint)
+    _assert_unchanged(destinations_path, destinations_fingerprint)
+    _assert_unchanged(schedule_path, schedule_fingerprint)
     if _fingerprint(strategy_directory.lstat()) != _fingerprint(directory_before):
         raise ConfigError("strategy directory changed while reading")
     entries_after = tuple(sorted(path.name for path in strategy_directory.iterdir()))
@@ -295,16 +465,34 @@ def load_configuration(
 
     resume_value = _load_yaml(resume_raw, str(resume_path))
     strategy_value = _load_yaml(strategy_raw, str(strategy_path))
+    sources_value = _load_yaml(sources_raw, str(sources_path))
+    destinations_value = _load_yaml(destinations_raw, str(destinations_path))
+    schedule_value = _load_yaml(schedule_raw, str(schedule_path))
     _validate(resume_value, "resume-facts.schema.yaml", "resume profile")
     _validate(strategy_value, "strategy.schema.yaml", "strategy")
+    _validate(sources_value, "sources.schema.yaml", "sources")
+    _validate(destinations_value, "destinations.schema.yaml", "destinations")
+    _validate(schedule_value, "schedule.schema.yaml", "schedule")
 
     profile_snapshot = _snapshot_bytes(((resume_path.name, resume_raw),))
     strategy_snapshot = _snapshot_bytes((("strategy.yaml", strategy_raw),))
+    sources_snapshot = _snapshot_bytes((("sources.yaml", sources_raw),))
+    destinations_snapshot = _snapshot_bytes((("destinations.yaml", destinations_raw),))
+    schedule_snapshot = _snapshot_bytes((("schedule.yaml", schedule_raw),))
     return LoadedConfiguration(
         profile=_compile_profile(resume_value),
         strategy=_compile_strategy(strategy_value),
+        sources=_compile_sources(sources_value),
+        destinations=_compile_destinations(destinations_value),
+        schedule=_compile_schedule(schedule_value),
         profile_hash=hashlib.sha256(profile_snapshot).hexdigest(),
         strategy_hash=hashlib.sha256(strategy_snapshot).hexdigest(),
+        sources_hash=hashlib.sha256(sources_snapshot).hexdigest(),
+        destinations_hash=hashlib.sha256(destinations_snapshot).hexdigest(),
+        schedule_hash=hashlib.sha256(schedule_snapshot).hexdigest(),
         profile_snapshot_bytes=profile_snapshot,
         strategy_snapshot_bytes=strategy_snapshot,
+        sources_snapshot_bytes=sources_snapshot,
+        destinations_snapshot_bytes=destinations_snapshot,
+        schedule_snapshot_bytes=schedule_snapshot,
     )

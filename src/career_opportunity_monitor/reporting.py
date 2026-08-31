@@ -6,7 +6,7 @@ import stat
 import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta, tzinfo
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal, Protocol
@@ -31,6 +31,12 @@ class ReportRepository(Protocol):
     def store_report(self, key: str, content: bytes, created_at: str) -> int: ...
 
     def get_report(self, key: str) -> bytes: ...
+
+
+class WeeklyReportRepository(ReportRepository, Protocol):
+    def list_reports(
+        self, prefix: str, start: str, end: str
+    ) -> tuple[tuple[str, bytes], ...]: ...
 
 
 class FeedbackRepository(Protocol):
@@ -120,15 +126,85 @@ class DailyReportService:
             display_limit=display_limit,
         )
         self._repository.store_report(f"daily:{report_date}", content, created_at)
-        for delivery in deliveries:
-            _deliver(delivery, content)
+        _deliver_all(deliveries, content)
         return content
 
     def retry_delivery(self, key: str, deliveries: tuple[Delivery, ...]) -> bytes:
         content = self._repository.get_report(key)
-        for delivery in deliveries:
-            _deliver(delivery, content)
+        _deliver_all(deliveries, content)
         return content
+
+
+class WeeklyReportService:
+    """Render, persist, and deliver one immutable local calendar week."""
+
+    def __init__(self, repository: WeeklyReportRepository) -> None:
+        self._repository = repository
+
+    def create_and_deliver(
+        self,
+        *,
+        week_start: str,
+        week_end: str,
+        timezone: str,
+        created_at: str,
+        deliveries: tuple[Delivery, ...],
+    ) -> bytes:
+        reports = self._repository.list_reports("daily:", week_start, week_end)
+        content = render_weekly_report(
+            week_start=week_start,
+            week_end=week_end,
+            timezone=timezone,
+            daily_reports=reports,
+        )
+        self._repository.store_report(f"weekly:{week_start}", content, created_at)
+        _deliver_all(deliveries, content)
+        return content
+
+    def retry_delivery(self, key: str, deliveries: tuple[Delivery, ...]) -> bytes:
+        content = self._repository.get_report(key)
+        _deliver_all(deliveries, content)
+        return content
+
+
+def weekly_window(instant: datetime, timezone: tzinfo) -> tuple[str, str]:
+    if instant.tzinfo is None:
+        raise ValueError("weekly instant must include a timezone")
+    local_day = instant.astimezone(timezone).date()
+    start = local_day - timedelta(days=local_day.weekday())
+    return start.isoformat(), (start + timedelta(days=7)).isoformat()
+
+
+def render_weekly_report(
+    *,
+    week_start: str,
+    week_end: str,
+    timezone: str,
+    daily_reports: tuple[tuple[str, bytes], ...],
+) -> bytes:
+    start = _parse_date(week_start)
+    end = _parse_date(week_end)
+    if end - start != timedelta(days=7):
+        raise ValueError("weekly report range must contain exactly seven days")
+    end_day = end - timedelta(days=1)
+    lines = [
+        f"# Weekly career report: {start.isoformat()} to {end_day.isoformat()}",
+        "",
+        f"Timezone: {timezone}.",
+        f"Daily reports: {len(daily_reports)}.",
+        "",
+        "## Daily report history",
+        "",
+    ]
+    if not daily_reports:
+        lines.append("The week has no stored daily reports.")
+    else:
+        for key, content in daily_reports:
+            report_date = key.removeprefix("daily:")
+            text = content.decode("utf-8")
+            lines.extend((f"### {report_date}", "", text.rstrip("\n"), ""))
+        lines.pop()
+    return ("\n".join(lines) + "\n").encode("utf-8")
 
 
 class FeedbackService:
@@ -182,7 +258,7 @@ def render_daily_report(
         lines.append("The report displays no jobs.")
     lines.extend(("", "## Source health", ""))
     if source_health:
-        for health in sorted(source_health, key=lambda value: value.source_name):
+        for health in source_health:
             lines.extend(_source_health_lines(health))
     else:
         lines.append("The report has no source health receipt.")
@@ -338,6 +414,20 @@ def _deliver(delivery: Delivery, content: bytes) -> None:
         delivery.deliver(content)
     except OSError as exc:
         raise DeliveryError(f"delivery failed: {exc}") from exc
+
+
+def _deliver_all(deliveries: tuple[Delivery, ...], content: bytes) -> None:
+    failures: list[DeliveryError] = []
+    for delivery in deliveries:
+        try:
+            _deliver(delivery, content)
+        except DeliveryError as exc:
+            failures.append(exc)
+    if len(failures) == 1:
+        raise failures[0]
+    if failures:
+        details = "; ".join(str(failure) for failure in failures)
+        raise DeliveryError(f"{len(failures)} deliveries failed: {details}")
 
 
 def _json_bytes(value: object) -> bytes:

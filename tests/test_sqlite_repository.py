@@ -14,6 +14,7 @@ from typing import cast
 import pytest
 import yaml
 
+import career_opportunity_monitor.sqlite_repository as sqlite_repository_module
 from career_opportunity_monitor.config import load_configuration
 from career_opportunity_monitor.ranking import parse_job
 from career_opportunity_monitor.repository import (
@@ -25,6 +26,7 @@ from career_opportunity_monitor.repository import (
 from career_opportunity_monitor.sqlite_repository import SQLiteRepository
 
 EXPECTED_TABLES = {
+    "delivery_attempts",
     "evaluations",
     "feedback",
     "job_versions",
@@ -35,11 +37,80 @@ EXPECTED_TABLES = {
     "schema_migrations",
     "source_observations",
     "source_runs",
+    "sources_snapshots",
     "strategy_snapshots",
     "writer_lock",
 }
 
 ROOT = Path(__file__).parents[1]
+
+
+def _create_legacy_database(path: Path, version: int) -> None:
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        sqlite_repository_module._MIGRATION_1  # pyright: ignore[reportPrivateUsage]
+    )
+    connection.execute(
+        "INSERT INTO schema_migrations(version, applied_at) VALUES (1, ?)",
+        ("2026-08-26T00:00:00Z",),
+    )
+    if version == 2:
+        connection.executescript(
+            sqlite_repository_module._MIGRATION_2  # pyright: ignore[reportPrivateUsage]
+        )
+        connection.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (2, ?)",
+            ("2026-08-26T00:01:00Z",),
+        )
+    connection.execute(f"PRAGMA user_version = {version}")
+    connection.execute(
+        "INSERT INTO source_runs"
+        "(run_key, source_name, started_at, status) VALUES (?, ?, ?, 'failed')",
+        ("legacy-run", "legacy-source", "2026-08-26T00:02:00Z"),
+    )
+    connection.commit()
+    connection.close()
+
+
+def _assert_legacy_database_migrates_to_latest(path: Path) -> None:
+    repository = SQLiteRepository(path)
+
+    connection = sqlite3.connect(path)
+    assert connection.execute("PRAGMA user_version").fetchone() == (5,)
+    sources_hash_column = next(
+        row
+        for row in connection.execute("PRAGMA table_info(source_runs)")
+        if row[1] == "sources_hash"
+    )
+    assert sources_hash_column[3] == 1
+    assert connection.execute(
+        "SELECT count(*) FROM source_runs AS run "
+        "JOIN sources_snapshots AS snapshot "
+        "ON snapshot.sources_hash = run.sources_hash"
+    ).fetchone() == (1,)
+    connection.close()
+    assert repository.integrity_check() == "ok"
+    assert repository.foreign_key_check() == ()
+    assert repository.get_source_run(1).sources_hash
+    repository.close()
+
+
+def test_open_migrates_version_1_database_to_latest_with_source_correlation(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "history.sqlite3"
+    _create_legacy_database(path, 1)
+
+    _assert_legacy_database_migrates_to_latest(path)
+
+
+def test_open_migrates_version_2_database_to_latest_with_source_correlation(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "history.sqlite3"
+    _create_legacy_database(path, 2)
+
+    _assert_legacy_database_migrates_to_latest(path)
 
 
 def _observation(
@@ -597,6 +668,7 @@ def test_evaluation_is_idempotent_and_bound_to_exact_snapshots(tmp_path: Path) -
         "llm_assessments": 0,
         "profile_snapshots": 1,
         "reports": 0,
+        "sources_snapshots": 0,
         "strategy_snapshots": 1,
     }
     with pytest.raises(RepositoryError, match="profile snapshot"):
@@ -627,9 +699,15 @@ def test_snapshots_accept_configuration_hash_domain(tmp_path: Path) -> None:
         configuration.strategy_snapshot_bytes,
         "2026-08-27T00:00:00Z",
     )
+    repository.store_sources_snapshot(
+        configuration.sources_hash,
+        configuration.sources_snapshot_bytes,
+        "2026-08-27T00:00:00Z",
+    )
 
     assert repository.artifact_counts()["profile_snapshots"] == 1
     assert repository.artifact_counts()["strategy_snapshots"] == 1
+    assert "sources_snapshots" in repository.table_names()
 
     repository.close()
 
@@ -711,6 +789,7 @@ def test_reports_feedback_and_optional_assessments_are_idempotent(
         "llm_assessments": 1,
         "profile_snapshots": 1,
         "reports": 1,
+        "sources_snapshots": 0,
         "strategy_snapshots": 1,
     }
 

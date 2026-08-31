@@ -2,18 +2,22 @@ from __future__ import annotations
 
 import json
 import shutil
+import socket
 import stat
 from dataclasses import dataclass
+from http.client import BadStatusLine
 from pathlib import Path
+from typing import Never
+from unittest.mock import patch
 
 import pytest
 
-from career_opportunity_monitor.nvidia_workday import SourceError
 from career_opportunity_monitor.ranking import parse_job
 from career_opportunity_monitor.repository import SourceObservation
 from career_opportunity_monitor.runtime import run
-from career_opportunity_monitor.source import SourceFetchResult
+from career_opportunity_monitor.source import SourceError, SourceFetchResult
 from career_opportunity_monitor.sqlite_repository import SQLiteRepository
+from career_opportunity_monitor.workday import UrlLibTransport, WorkdaySource
 
 ROOT = Path(__file__).parents[1]
 
@@ -33,6 +37,7 @@ def _runtime_environment(tmp_path: Path) -> dict[str, str]:
         "CAREER_MONITOR_RESUME_PATH": str(profile_directory / "resume_facts.yaml"),
         "CAREER_MONITOR_CONFIG_DIR": str(config_directory),
         "CAREER_MONITOR_DATA_DIR": str(data_directory),
+        "CAREER_MONITOR_MODE": "demo",
     }
 
 
@@ -47,10 +52,94 @@ def test_validate_accepts_valid_runtime_mounts(
     output = json.loads(capsys.readouterr().out)
     assert output == {
         "command": "validate",
-        "profile_id": "alex-chen-fictional",
+        "destinations": [
+            {
+                "enabled": False,
+                "id": "discord-alerts-example",
+                "report_cadences": ["daily"],
+                "type": "discord",
+            }
+        ],
+        "mode": "demo",
+        "paths": {
+            "configuration_directory": environment["CAREER_MONITOR_CONFIG_DIR"],
+            "data_directory": environment["CAREER_MONITOR_DATA_DIR"],
+            "resume_file": environment["CAREER_MONITOR_RESUME_PATH"],
+        },
+        "schedule": {
+            "daily": {"cron": "0 0 * * *", "enabled": True},
+            "timezone": "Asia/Taipei",
+            "weekly": {"cron": "0 1 * * 1", "enabled": True},
+        },
+        "schema_versions": {
+            "destinations": 1,
+            "resume_facts": 1,
+            "schedule": 1,
+            "sources": 1,
+            "strategy": 1,
+        },
+        "sources": [
+            {"adapter": "workday", "enabled": True, "id": "example-workday"},
+            {"adapter": "workday", "enabled": True, "id": "second-example-workday"},
+        ],
         "status": "ok",
-        "strategy_id": "taiwan-software-fictional",
     }
+
+
+def test_production_mode_rejects_public_fictional_configuration(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    environment = _runtime_environment(tmp_path)
+    environment.pop("CAREER_MONITOR_MODE")
+
+    exit_code = run(("validate",), environment=environment)
+
+    assert exit_code == 2
+    captured = capsys.readouterr()
+    assert "public fictional examples" in captured.err
+    assert captured.out == ""
+
+
+def test_validate_summary_does_not_disclose_private_values(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    environment = _runtime_environment(tmp_path)
+    resume_path = Path(environment["CAREER_MONITOR_RESUME_PATH"])
+    private_statement = "PRIVATE-RESUME-SENTINEL"
+    resume_path.write_text(
+        resume_path.read_text(encoding="utf-8").replace(
+            "Builds tested Python services", private_statement
+        ),
+        encoding="utf-8",
+    )
+    strategy_path = Path(environment["CAREER_MONITOR_CONFIG_DIR"]) / "strategy.yaml"
+    private_strategy = "PRIVATE-STRATEGY-SENTINEL"
+    strategy_path.write_text(
+        strategy_path.read_text(encoding="utf-8").replace(
+            "Software Engineer", private_strategy
+        ),
+        encoding="utf-8",
+    )
+    secret = "https://discord.com/api/webhooks/123456789/private-secret"
+    secret_path = tmp_path / "discord-webhook"
+    secret_path.write_text(secret + "\n", encoding="utf-8")
+    destinations_path = (
+        Path(environment["CAREER_MONITOR_CONFIG_DIR"]) / "destinations.yaml"
+    )
+    destinations_path.write_text(
+        destinations_path.read_text(encoding="utf-8")
+        .replace("enabled: false", "enabled: true")
+        .replace("/run/secrets/discord-webhook", str(secret_path)),
+        encoding="utf-8",
+    )
+
+    assert run(("validate",), environment=environment) == 0
+
+    output = capsys.readouterr().out
+    assert private_statement not in output
+    assert private_strategy not in output
+    assert secret not in output
+    assert str(secret_path) not in output
 
 
 def test_daily_dry_run_writes_a_quiet_receipt(
@@ -85,7 +174,7 @@ def test_daily_dry_run_writes_a_quiet_receipt(
 
 @dataclass(frozen=True)
 class FixtureSource:
-    name: str = "nvidia-workday"
+    name: str = "example-workday"
 
     def fetch(self) -> SourceFetchResult:
         job = parse_job(
@@ -94,7 +183,7 @@ class FixtureSource:
                 "source_name": self.name,
                 "source_job_id": "JR-FICTIONAL-1",
                 "source_url": "https://jobs.example/JR-FICTIONAL-1",
-                "company": "NVIDIA",
+                "company": "Example Company",
                 "title": "Software Engineer",
                 "description_text": "Python testing and data processing",
                 "location": {
@@ -130,7 +219,7 @@ class FixtureSource:
 
 @dataclass(frozen=True)
 class EmptyPartialSource:
-    name: str = "nvidia-workday"
+    name: str = "example-workday"
 
     def fetch(self) -> SourceFetchResult:
         return SourceFetchResult(
@@ -145,10 +234,187 @@ class EmptyPartialSource:
 
 @dataclass(frozen=True)
 class FailedSource:
-    name: str = "nvidia-workday"
+    name: str = "failed-workday"
 
     def fetch(self) -> SourceFetchResult:
         raise SourceError("source collection failed: temporary outage")
+
+
+class MalformedExternalPathTransport:
+    def request(self, url: str, body: bytes | None) -> bytes:
+        assert body is not None
+        return b'{"total":1,"jobPostings":[{"externalPath":"https://["}]}'
+
+
+class BadStatusLineConnection:
+    def request(
+        self, method: str, path: str, body: bytes | None, headers: dict[str, str]
+    ) -> None:
+        return None
+
+    def getresponse(self) -> Never:
+        raise BadStatusLine("ATTACKER-CONTROLLED-STATUS-LINE")
+
+    def close(self) -> None:
+        return None
+
+
+def test_daily_collects_configured_sources_in_order_and_isolates_one_failure(
+    tmp_path: Path,
+) -> None:
+    environment = _runtime_environment(tmp_path)
+    environment["CAREER_MONITOR_RUN_ID"] = "multi-source"
+    environment["CAREER_MONITOR_NOW"] = "2026-08-27T03:30:00Z"
+
+    exit_code = run(
+        ("daily",),
+        environment=environment,
+        sources=(
+            FixtureSource("first-workday"),
+            FailedSource(),
+            FixtureSource("second-workday"),
+        ),
+    )
+
+    assert exit_code == 0
+    data_directory = Path(environment["CAREER_MONITOR_DATA_DIR"])
+    report = (data_directory / "reports" / "daily-2026-08-27.md").read_text()
+    assert report.index("- first-workday.") < report.index("- failed-workday.")
+    assert report.index("- failed-workday.") < report.index("- second-workday.")
+    receipt = json.loads(
+        (data_directory / "receipts" / "daily-multi-source.json").read_text()
+    )
+    assert receipt["accepted"] == 2
+    assert receipt["source_failures"] == 1
+    repository = SQLiteRepository(data_directory / "history.sqlite3")
+    source_runs = [repository.get_source_run(index) for index in (1, 2, 3)]
+    assert [source_run.status for source_run in source_runs] == [
+        "completed",
+        "failed",
+        "completed",
+    ]
+    assert {source_run.sources_hash for source_run in source_runs} == {
+        receipt["sources_hash"]
+    }
+    repository.close()
+
+
+def test_daily_isolates_malformed_workday_data_between_valid_sources(
+    tmp_path: Path,
+) -> None:
+    environment = _runtime_environment(tmp_path)
+    environment["CAREER_MONITOR_RUN_ID"] = "malformed-middle"
+    environment["CAREER_MONITOR_NOW"] = "2026-08-27T03:30:00Z"
+    malformed = WorkdaySource(
+        name="malformed-workday",
+        origin="https://malformed.example.com",
+        tenant="malformed",
+        site="ExternalCareerSite",
+        company="Malformed Example",
+        search_text="Taiwan",
+        transport=MalformedExternalPathTransport(),
+        retries=0,
+    )
+
+    exit_code = run(
+        ("daily",),
+        environment=environment,
+        sources=(
+            FixtureSource("first-workday"),
+            malformed,
+            FixtureSource("second-workday"),
+        ),
+    )
+
+    assert exit_code == 0
+    data_directory = Path(environment["CAREER_MONITOR_DATA_DIR"])
+    report = (data_directory / "reports" / "daily-2026-08-27.md").read_text()
+    assert report.index("- first-workday.") < report.index("- malformed-workday.")
+    assert report.index("- malformed-workday.") < report.index("- second-workday.")
+    receipt = json.loads(
+        (data_directory / "receipts" / "daily-malformed-middle.json").read_text()
+    )
+    assert receipt["accepted"] == 2
+    assert receipt["source_partial"] is True
+    repository = SQLiteRepository(data_directory / "history.sqlite3")
+    assert [repository.get_source_run(index).status for index in (1, 2, 3)] == [
+        "completed",
+        "completed",
+        "completed",
+    ]
+    malformed_run = repository.get_source_run(2)
+    assert malformed_run.receipt is not None
+    malformed_receipt = json.loads(malformed_run.receipt)
+    assert malformed_receipt["partial"] is True
+    assert "unsafe externalPath" in malformed_receipt["failures"][0]
+    repository.close()
+
+
+def test_daily_isolates_bad_http_response_between_valid_sources(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    environment = _runtime_environment(tmp_path)
+    environment["CAREER_MONITOR_RUN_ID"] = "bad-http-middle"
+    environment["CAREER_MONITOR_NOW"] = "2026-08-27T03:30:00Z"
+    malformed = WorkdaySource(
+        name="malformed-workday",
+        origin="https://malformed.example.com",
+        tenant="malformed",
+        site="ExternalCareerSite",
+        company="Malformed Example",
+        search_text="Taiwan",
+        transport=UrlLibTransport(
+            approved_origin="https://malformed.example.com",
+            timeout_seconds=10,
+            response_limit_bytes=1_000_000,
+            connection_factory=lambda host, address, timeout: BadStatusLineConnection(),
+        ),
+        retries=0,
+    )
+
+    with patch(
+        "career_opportunity_monitor.workday.socket.getaddrinfo",
+        return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))],
+    ):
+        exit_code = run(
+            ("daily",),
+            environment=environment,
+            sources=(
+                FixtureSource("first-workday"),
+                malformed,
+                FixtureSource("second-workday"),
+            ),
+        )
+
+    assert exit_code == 0
+    data_directory = Path(environment["CAREER_MONITOR_DATA_DIR"])
+    report = (data_directory / "reports" / "daily-2026-08-27.md").read_text()
+    assert report.index("- first-workday.") < report.index("- malformed-workday.")
+    assert report.index("- malformed-workday.") < report.index("- second-workday.")
+    receipt_text = (
+        data_directory / "receipts" / "daily-bad-http-middle.json"
+    ).read_text()
+    receipt = json.loads(receipt_text)
+    assert receipt["accepted"] == 2
+    assert receipt["source_failures"] == 1
+    repository = SQLiteRepository(data_directory / "history.sqlite3")
+    source_runs = [repository.get_source_run(index) for index in (1, 2, 3)]
+    assert [source_run.status for source_run in source_runs] == [
+        "completed",
+        "failed",
+        "completed",
+    ]
+    malformed_run = source_runs[1]
+    assert malformed_run.sources_hash == receipt["sources_hash"]
+    assert malformed_run.error == (
+        "source collection failed: list page 0: "
+        "request failed due to invalid HTTP response"
+    )
+    captured = capsys.readouterr()
+    assert "ATTACKER-CONTROLLED" not in "".join(
+        (report, receipt_text, malformed_run.error, captured.out, captured.err)
+    )
+    repository.close()
 
 
 def test_daily_live_run_collects_scores_and_writes_report(
@@ -170,7 +436,7 @@ def test_daily_live_run_collects_scores_and_writes_report(
     assert "LLM adjustment: +0 (off)." in report
     assert "Evidence IDs: fact-python-services." in report
     assert "Omitted jobs: 0." in report
-    assert "- nvidia-workday. Status: complete." in report
+    assert "- example-workday. Status: complete." in report
 
     receipt_path = data_directory / "receipts" / "daily-daily-live-fixture.json"
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
@@ -192,31 +458,77 @@ def test_daily_live_run_collects_scores_and_writes_report(
         "llm_assessments": 1,
         "profile_snapshots": 1,
         "reports": 1,
+        "sources_snapshots": 1,
         "strategy_snapshots": 1,
     }
     repository.close()
 
 
-def test_weekly_role_is_rejected_without_a_completed_receipt(
+def test_daily_report_id_uses_configured_local_calendar_date(tmp_path: Path) -> None:
+    environment = _runtime_environment(tmp_path)
+    environment["CAREER_MONITOR_RUN_ID"] = "daily-local-date"
+    environment["CAREER_MONITOR_NOW"] = "2026-08-30T16:00:00Z"
+
+    assert run(("daily",), environment=environment, source=FixtureSource()) == 0
+
+    data_directory = Path(environment["CAREER_MONITOR_DATA_DIR"])
+    report_path = data_directory / "reports" / "daily-2026-08-31.md"
+    assert report_path.is_file()
+    repository = SQLiteRepository(data_directory / "history.sqlite3")
+    assert repository.get_report("daily:2026-08-31") == report_path.read_bytes()
+    repository.close()
+
+
+def test_weekly_role_aggregates_history_without_collecting(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     environment = _runtime_environment(tmp_path)
     environment["CAREER_MONITOR_RUN_ID"] = "weekly-fixture"
-    environment["CAREER_MONITOR_NOW"] = "2026-08-27T03:35:00Z"
+    environment["CAREER_MONITOR_NOW"] = "2026-08-31T01:00:00Z"
     data_directory = Path(environment["CAREER_MONITOR_DATA_DIR"])
+    repository = SQLiteRepository(data_directory / "history.sqlite3")
+    repository.store_report("daily:2026-08-24", b"# Fictional Monday\n", "one")
+    repository.store_report("daily:2026-08-25", b"# Fictional Tuesday\n", "two")
+    repository.close()
 
-    exit_code = run(("weekly",), environment=environment)
+    exit_code = run(("weekly",), environment=environment, source=FailedSource())
 
-    assert exit_code == 2
-    assert not (data_directory / "receipts" / "weekly-weekly-fixture.json").exists()
-    error_path = data_directory / "errors" / "weekly-weekly-fixture.json"
-    error = json.loads(error_path.read_text(encoding="utf-8"))
-    assert error["command"] == "weekly"
-    assert error["failed_at"] == "2026-08-27T03:35:00Z"
-    assert error["run_id"] == "weekly-fixture"
-    assert error["status"] == "failed"
-    assert "weekly maintenance is not implemented" in error["error"]
-    assert "weekly maintenance is not implemented" in capsys.readouterr().err
+    assert exit_code == 0
+    report_path = data_directory / "reports" / "weekly-2026-08-24.md"
+    report = report_path.read_text(encoding="utf-8")
+    assert report.index("Fictional Monday") < report.index("Fictional Tuesday")
+    receipt = json.loads(
+        (data_directory / "receipts" / "weekly-weekly-fixture.json").read_text()
+    )
+    assert receipt["week_start"] == "2026-08-24"
+    assert receipt["week_end"] == "2026-08-31"
+    assert json.loads(capsys.readouterr().out)["report"] == str(report_path)
+
+
+def test_weekly_role_selects_previous_local_week_across_spring_dst(
+    tmp_path: Path,
+) -> None:
+    environment = _runtime_environment(tmp_path)
+    environment["CAREER_MONITOR_RUN_ID"] = "weekly-spring-dst"
+    environment["CAREER_MONITOR_NOW"] = "2026-03-09T04:00:00Z"
+    schedule_path = Path(environment["CAREER_MONITOR_CONFIG_DIR"]) / "schedule.yaml"
+    schedule_path.write_text(
+        schedule_path.read_text(encoding="utf-8").replace(
+            "timezone: Asia/Taipei", "timezone: America/New_York"
+        ),
+        encoding="utf-8",
+    )
+    data_directory = Path(environment["CAREER_MONITOR_DATA_DIR"])
+    repository = SQLiteRepository(data_directory / "history.sqlite3")
+    repository.store_report("daily:2026-02-23", b"wrong week\n", "one")
+    repository.store_report("daily:2026-03-02", b"expected week\n", "two")
+    repository.close()
+
+    assert run(("weekly",), environment=environment) == 0
+
+    report_path = data_directory / "reports" / "weekly-2026-03-02.md"
+    assert report_path.is_file()
+    assert b"expected week" in report_path.read_bytes()
 
 
 def test_partial_daily_run_does_not_age_unseen_jobs(tmp_path: Path) -> None:
@@ -232,7 +544,7 @@ def test_partial_daily_run_does_not_age_unseen_jobs(tmp_path: Path) -> None:
     repository = SQLiteRepository(
         Path(environment["CAREER_MONITOR_DATA_DIR"]) / "history.sqlite3"
     )
-    assert repository.get_job("nvidia-workday", "JR-FICTIONAL-1").state == "new"
+    assert repository.get_job("example-workday", "JR-FICTIONAL-1").state == "new"
     repository.close()
 
 
@@ -254,12 +566,15 @@ def test_total_source_outage_exits_nonzero_and_keeps_failed_run_evidence(
         )
     )
     assert error["status"] == "failed"
+    assert isinstance(error["sources_hash"], str)
+    assert len(error["sources_hash"]) == 64
     assert "source collection failed" in error["error"]
     assert "source collection failed" in capsys.readouterr().err
     repository = SQLiteRepository(data_directory / "history.sqlite3")
     source_run = repository.get_source_run(1)
     assert source_run.status == "failed"
     assert source_run.error == "source collection failed: temporary outage"
+    assert source_run.sources_hash == error["sources_hash"]
     repository.close()
 
 

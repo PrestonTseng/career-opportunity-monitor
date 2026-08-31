@@ -1,77 +1,109 @@
 # Career Opportunity Monitor
 
-Career Opportunity Monitor is a self-hosted job monitor. It reads NVIDIA Taiwan jobs from the public NVIDIA Workday service.
+Career Opportunity Monitor is a self-hosted job monitor. It reads approved public Workday sources and stores job history in SQLite.
 
-The monitor keeps job history in SQLite. It scores jobs against a private resume profile and a private strategy.
+The monitor scores all accepted jobs against a private resume profile and a private strategy. It never sends job applications.
 
 ## Requirements
 
-Install Docker with the Compose plugin. You do not need a local Python installation for the quick start.
+Install Docker with the Compose plugin. The quick start does not require a local Python installation.
 
-## Quick start
+## Try the fictional demo
 
-The files in `examples/` describe a fictional person. Replace them only after the fictional flow works.
+The public examples describe fictional people and companies. Demo mode permits these files and disables Discord delivery.
 
-1. Clone this repository.
-2. Open a shell in the repository root.
-3. Build the CLI image:
+```text
+CAREER_MONITOR_MODE=demo \
+CAREER_MONITOR_RESUME_FILE=./examples/resume_facts.yaml \
+CAREER_MONITOR_CONFIG_DIR=./examples/strategy/v1 \
+docker compose --profile cli run --rm cli validate
 
-   ```text
-   docker compose --profile cli build cli
-   ```
+CAREER_MONITOR_MODE=demo \
+CAREER_MONITOR_RESUME_FILE=./examples/resume_facts.yaml \
+CAREER_MONITOR_CONFIG_DIR=./examples/strategy/v1 \
+docker compose --profile cli run --rm cli daily --dry-run
+```
 
-4. Validate the fictional files:
+Production mode is the default. Production mode rejects the public fictional profile and strategy identities.
 
-   ```text
-   docker compose --profile cli run --rm cli validate
-   ```
+## Create a private deployment
 
-5. Do a dry run of the runtime and storage paths:
+Use this private layout outside Git, or use the ignored `private/` directory:
 
-   ```text
-   docker compose --profile cli run --rm cli daily --dry-run
-   ```
+```text
+private/
+  resume_facts.yaml
+  config/
+    strategy.yaml
+    sources.yaml
+    destinations.yaml
+    schedule.yaml
+  secrets/
+    discord-webhook
+```
 
-6. Create the first report from the current public source:
+Copy `.env.example` to `.env`. Set the three private host paths and keep `CAREER_MONITOR_MODE=production`.
 
-   ```text
-   docker compose --profile cli run --rm cli daily
-   ```
+Copy the fictional YAML files as templates. Replace all fictional identity, resume, strategy, source, and destination values.
 
-7. Show the report path from the JSON output. Then copy the report from the volume:
+Create a Discord webhook in the server integration settings. Put its URL as one line in `private/secrets/discord-webhook`.
 
-   ```text
-   docker compose --profile cli run --rm --entrypoint sh cli -c 'cat /data/reports/daily-*.md'
-   ```
+Do not put the webhook URL in YAML, `.env`, a command, or a log. Restrict the secret file to its owner.
 
-The dry run does not contact the source. The live daily command creates a Markdown report but does not send applications or messages.
+```text
+chmod 600 private/secrets/discord-webhook
+```
 
-## Private setup
+Build the image and validate the selected configuration:
 
-Do not edit the fictional examples with private values. Put private files outside Git, or put them under the ignored `.runtime/` directory.
+```text
+docker compose --profile cli build cli
+docker compose --profile cli run --rm cli validate
+docker compose --profile cli run --rm cli daily --dry-run
+```
 
-Set `CAREER_MONITOR_RESUME_FILE` to the resume-facts file. Set `CAREER_MONITOR_CONFIG_DIR` to the strategy directory.
+The validation output shows selected paths, schema versions, source and destination IDs, schedules, the timezone, and enabled states.
 
-Compose mounts both paths as read-only files. The monitor writes history, receipts, errors, and reports only to `/data`.
+The validation output does not show resume facts, strategy contents, webhook URLs, or secret bytes.
 
-## Scheduler
+## Run reports
 
-Start the UTC scheduler after the CLI flow works:
+Create and deliver a daily report:
+
+```text
+docker compose --profile cli run --rm cli daily
+```
+
+Create a weekly report from stored daily history:
+
+```text
+docker compose --profile cli run --rm cli weekly
+```
+
+Start the daily and weekly scheduler:
 
 ```text
 docker compose --profile scheduler up --detach scheduler
 ```
 
-The scheduler runs the daily command at 00:00 UTC.
+The scheduler uses the IANA timezone and cron values in `schedule.yaml`.
 
 ## Documentation
 
+- [Configuration and private setup](docs/configuration.md)
+- [Operations, retry, backup, and restore](docs/operations.md)
 - [Architecture](docs/architecture.md)
-- [Configuration and resume facts](docs/configuration.md)
+- [Workday adapter examples](docs/workday-adapter.md)
+- [Migration from v1](docs/migration-v1.md)
 - [Optional LLM API](docs/llm-api.md)
-- [Operations](docs/operations.md)
-- [Security](SECURITY.md)
+- [Security and privacy](SECURITY.md)
 - [Contributing](CONTRIBUTING.md)
+
+## Limits
+
+The monitor supports only the closed `workday` adapter registry. It does not bypass authentication, robots controls, rate limits, or source terms.
+
+A source can change its public API without notice. Review source failures and reports before you act on the results.
 
 ## License
 

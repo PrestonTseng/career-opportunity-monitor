@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
 from typing import Literal
 
 Category = Literal["title", "skills", "experience", "location", "company"]
@@ -10,6 +11,8 @@ FactKind = Literal[
     "certification", "education", "employment", "language", "project", "skill"
 ]
 FactStatus = Literal["confirmed", "planned"]
+SourceAdapter = Literal["workday"]
+ReportCadence = Literal["daily", "weekly"]
 
 CATEGORIES: tuple[Category, ...] = (
     "title",
@@ -67,13 +70,68 @@ class Strategy:
 
 
 @dataclass(frozen=True)
+class WorkdayOptions:
+    page_size: int
+    max_pages: int
+    max_requests: int
+    timeout_seconds: float
+    response_limit_bytes: int
+    retries: int
+    rate_limit_seconds: float
+
+
+@dataclass(frozen=True)
+class SourceConfiguration:
+    id: str
+    enabled: bool
+    adapter: SourceAdapter
+    origin: str
+    tenant: str
+    site: str
+    company: str
+    search_text: str
+    options: WorkdayOptions
+
+
+@dataclass(frozen=True)
+class DestinationConfiguration:
+    id: str
+    enabled: bool
+    type: Literal["discord"]
+    report_cadences: tuple[ReportCadence, ...]
+    webhook_url_file: Path
+
+
+@dataclass(frozen=True)
+class CadenceSchedule:
+    enabled: bool
+    cron: str
+
+
+@dataclass(frozen=True)
+class ScheduleConfiguration:
+    timezone: str
+    daily: CadenceSchedule
+    weekly: CadenceSchedule
+
+
+@dataclass(frozen=True)
 class LoadedConfiguration:
     profile: CompiledProfile
     strategy: Strategy
+    sources: tuple[SourceConfiguration, ...]
+    destinations: tuple[DestinationConfiguration, ...]
+    schedule: ScheduleConfiguration
     profile_hash: str
     strategy_hash: str
+    sources_hash: str
+    destinations_hash: str
+    schedule_hash: str
     profile_snapshot_bytes: bytes
     strategy_snapshot_bytes: bytes
+    sources_snapshot_bytes: bytes
+    destinations_snapshot_bytes: bytes
+    schedule_snapshot_bytes: bytes
 
 
 WorkMode = Literal["office", "hybrid", "remote", "unknown"]

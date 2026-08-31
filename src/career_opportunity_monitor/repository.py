@@ -56,6 +56,7 @@ class StoredSourceRun:
     status: SourceRunStatus
     receipt: bytes | None
     error: str | None
+    sources_hash: str
 
 
 @runtime_checkable
@@ -74,7 +75,7 @@ class Repository(Protocol):
         ...
 
     def start_source_run(
-        self, source_name: str, started_at: str, *, run_id: str
+        self, source_name: str, started_at: str, *, run_id: str, sources_hash: str
     ) -> int: ...
 
     def record_observations(
@@ -109,6 +110,10 @@ class Repository(Protocol):
 
     def store_strategy_snapshot(
         self, strategy_hash: str, snapshot_bytes: bytes, created_at: str
+    ) -> None: ...
+
+    def store_sources_snapshot(
+        self, sources_hash: str, snapshot_bytes: bytes, created_at: str
     ) -> None: ...
 
     def store_evaluation(
